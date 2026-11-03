@@ -11,13 +11,13 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V10.1', page_icon='🎬', layout='wide')
+st.set_page_config(page_title='KarmaClip AI V11', page_icon='🎬', layout='wide')
 if "visual_reference_description" not in st.session_state:
     st.session_state.visual_reference_description = ""
 if "visual_reference_input" not in st.session_state:
     st.session_state.visual_reference_input = st.session_state.visual_reference_description
 
-st.title('🎬 KarmaClip AI V10.1')
+st.title('🎬 KarmaClip AI V11')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
@@ -186,37 +186,106 @@ BEATS = {
 }
 
 
-def image_guided_prompt(scene, style, reference_description, custom_idea="", mood="dreamlike",
-                        total_scenes=1, story_idea=""):
-    """Direct a visible physical action. Lyrics inform mood, not the literal text."""
-    index = int(scene.get("index", 0))
-    beats = BEATS.get(mood, BEATS["dreamlike"])
-    if total_scenes <= 1:
-        beat = beats[0]
+# Choreography: distinct physical steps, ordered from distance to final dip.
+DANCE_STAGES = [
+    ("far apart, facing one another", [
+        "They notice each other across the dance floor; both keep their distance",
+        "The first character takes two small steps to the beat while the second watches",
+        "The second character answers with a playful shoulder sway",
+        "Both step sideways in opposite directions, still watching each other",
+        "They exchange a shy smile and turn back toward each other",
+    ]),
+    ("closer, still not touching", [
+        "The first character approaches with a slow side-step",
+        "The second character mirrors the side-step and moves a little closer",
+        "They make eye contact and pause for a beat, smiling warmly",
+        "They circle one another with small steps, leaving space between them",
+        "They dance face to face, mirroring each other's footwork without touching",
+    ]),
+    ("standing face to face at arm's length", [
+        "One character offers a hand; the other hesitates playfully",
+        "Their fingertips meet for the first time",
+        "They clasp one hand and sway gently in time",
+        "The first character leads a slow underarm turn",
+        "The second character completes the turn and returns to face the partner",
+    ]),
+    ("dancing together, holding hands", [
+        "They perform two coordinated side steps while holding hands",
+        "They switch places with a smooth passing step",
+        "They perform a playful synchronized heel-toe pattern",
+        "One character leads a full gentle spin; the other follows",
+        "They move into a closer partner-dance hold",
+        "They sway together, then pivot to face the opposite direction",
+        "They execute a smooth cross-body lead and reconnect",
+        "They briefly separate by one step and reunite without losing the rhythm",
+        "They perform a lively side-to-side partner dance with matching footwork",
+        "They turn together in a small circle, keeping their balance",
+    ]),
+    ("close together, ready for the finale", [
+        "They slow their steps and exchange a delighted look",
+        "The leading character places one supporting arm securely behind the partner's back",
+        "They take a synchronized step to prepare a graceful dip",
+        "The leader gently dips the partner backward, supporting their back and waist; the partner arches back, head tilted backward, one leg raised elegantly",
+    ]),
+]
+
+
+def story_step(index, total, mood, story_mode, lyric_excerpt):
+    """Return an explicit beginning pose, physical action, and ending pose."""
+    if mood == 'dance' or mood == 'romantic':
+        # Reserve first 20%, next 20%, next 20%, next 30%, final 10% for the five acts.
+        progress = index / max(total - 1, 1)
+        boundaries = [0.2, 0.4, 0.6, 0.9, 1.01]
+        stage = next(i for i, bound in enumerate(boundaries) if progress < bound)
+        lower = [0, 0.2, 0.4, 0.6, 0.9][stage]
+        upper = boundaries[stage]
+        within = max(0, min(0.999, (progress - lower) / (upper - lower)))
+        actions = DANCE_STAGES[stage][1]
+        action_idx = min(len(actions)-1, int(within * len(actions)))
+        # Ensure final shot is the user's requested dip.
+        if index == total - 1:
+            stage = 4
+            action_idx = len(DANCE_STAGES[4][1]) - 1
+        action = DANCE_STAGES[stage][1][action_idx]
+        pose = DANCE_STAGES[stage][0]
+        previous_pose = DANCE_STAGES[max(stage-1,0)][0] if action_idx == 0 and stage else pose
+        end_pose = ('partner supported in a graceful backward dip, head back and one leg raised'
+                    if index == total-1 else pose)
     else:
-        beat_index = min(len(beats)-1, round(index * (len(beats)-1) / (total_scenes-1)))
-        beat = beats[beat_index]
-    variation = [
-        "A gentle tracking shot follows the movement",
-        "The camera slowly moves closer as the gesture unfolds",
-        "A side-angle shot emphasizes body language",
-        "The camera holds steady on the characters' reaction",
-        "A low-angle shot highlights the physical movement",
-        "The camera follows a small change in direction",
-    ][index % 6]
-    action = (custom_idea or (beat + ". " + variation)).strip()
-    action = re.sub(r"\\s+", " ", action)[:330]
+        actions = BEATS.get(mood, BEATS['dreamlike'])
+        action_idx = min(len(actions)-1, int(index / max(total,1) * len(actions)))
+        action = actions[action_idx]
+        previous_pose = 'in the same location and body positions as the end of the previous shot'
+        end_pose = 'the completed movement, ready to continue naturally'
+    # The lyrical mode influences expression and timing, NEVER changes who/where the characters are.
+    if story_mode == 'lyrics' and lyric_excerpt.strip():
+        feeling = scene_mood(lyric_excerpt, index, total)
+        cue = {
+            'romantic': 'gentle affectionate expression',
+            'melancholic': 'tender and introspective expression',
+            'dance': 'playful energetic timing',
+            'power': 'strong confident timing',
+            'dreamlike': 'curious expressive reaction',
+        }[feeling]
+        action += f'. Emotional cue from this part of the song: {cue}'
+    return previous_pose, action, end_pose
+
+
+def image_guided_prompt(scene, style, reference_description, custom_idea='', mood='dreamlike',
+                        total_scenes=1, story_idea='', story_mode='continuous'):
+    index = int(scene.get('index', 0))
+    start_pose, action, end_pose = story_step(index, total_scenes, mood, story_mode, scene.get('lyrics', ''))
+    if custom_idea.strip():
+        action = custom_idea.strip()
+    action = re.sub(r'\s+', ' ', action)[:360]
     subjects = reference_description.strip()
-    if subjects:
-        identity = f"Use the uploaded reference image. Same exact subjects: {subjects}. "
-        identity += "Keep the exact number of characters, faces, outfits, and colors. "
-    else:
-        identity = ("Use the uploaded reference image as the character and setting reference. "
-                    "Do not invent or remove subjects. ")
-    setting = (story_idea.strip()[:140] + ". ") if story_idea.strip() else ""
-    return (f"{identity}{setting}Action: {action}. "
-            f"One clear physical action, expressive natural movement, {style}, "
-            "single continuous shot, no captions, no new characters.")
+    identity = (f'Same characters as the reference image: {subjects}. ' if subjects else
+                'Keep exactly the characters from the reference image. ')
+    return (f'{identity}Shot {index+1}/{total_scenes}. '
+            f'Start: {start_pose}. Action: {action}. End: {end_pose}. '
+            f'Continue directly from the previous shot, same room and outfits. '
+            f'{style}. One continuous camera shot, no new characters, no text.')
+
 
 
 def create_scenes(lyrics, duration, style, ratio, idea, scene_length=5):
@@ -253,6 +322,9 @@ def creative_storyboard_with_ai(scenes, lyrics, reference_description, idea, sty
         "Never paraphrase, illustrate literally, quote or repeat song lyrics. "
         "Translate the song's emotional journey into a playful, meaningful sequence of "
         "VISUAL ACTIONS and evolving character relationships. "
+        "Every shot MUST begin in the exact position where the previous shot ended. "
+        "Build a clear beginning, gradual approach, physical interaction, multiple distinct "
+        "dance movements, and a final supported backward dip. Do not reset the scene. "
         "Respect all subjects, exact character count, outfits and appearance. "
         "Each shot is about 5 seconds, a single physically achievable action. "
         "Prompts concise (max 42 words), in English, visually specific, different "
@@ -433,6 +505,13 @@ with st.container(border=True):
                 st.rerun()
             except Exception as exc:
                 st.warning(f"Analyse avancée indisponible : {exc}")
+    st.radio('🎞️ Chronologie du clip',
+             ['Histoire continue de A à Z', 'Histoire continue synchronisée aux paroles'],
+             key='story_timeline_mode',
+             help='Dans les deux modes, les personnages et leurs mouvements se suivent. Le second adapte les expressions et les temps forts aux paroles.')
+    st.text_input('🎬 Mouvement final souhaité (facultatif)',
+                  value='Graceful partner dip: one partner leans backward, head back, one leg raised',
+                  key='finale_action')
     st.selectbox("🎭 Ambiance de réalisation", [
         "Automatique selon la chanson", "Danse et humour", "Romantique",
         "Mélancolique", "Énergie et dépassement", "Onirique et surprenant"
@@ -453,11 +532,22 @@ with st.container(border=True):
             selected_mood = moods.get(st.session_state.director_mood,
                                       scene_mood(lyrics + " " + idea, 0, len(st.session_state.scenes)))
             st.session_state.current_mood = selected_mood
+            timeline_mode = ('lyrics' if st.session_state.story_timeline_mode.startswith('Histoire continue synchronisée')
+                             else 'continuous')
+            st.session_state.timeline_mode = timeline_mode
             for generated_scene in st.session_state.scenes:
                 generated_scene["prompt"] = image_guided_prompt(
                     generated_scene, style, st.session_state.visual_reference_description,
                     mood=selected_mood, total_scenes=len(st.session_state.scenes),
-                    story_idea=idea
+                    story_idea=idea, story_mode=timeline_mode
+                )
+            if st.session_state.scenes and st.session_state.finale_action.strip():
+                final_scene = st.session_state.scenes[-1]
+                final_scene['prompt'] = image_guided_prompt(
+                    final_scene, style, st.session_state.visual_reference_description,
+                    custom_idea=st.session_state.finale_action.strip(),
+                    mood=selected_mood, total_scenes=len(st.session_state.scenes),
+                    story_idea=idea, story_mode=timeline_mode
                 )
             for k in list(st.session_state.keys()):
                 if re.fullmatch(r"prompt_\\d+", k):
@@ -518,7 +608,8 @@ if st.session_state.scenes:
                 new_prompt = image_guided_prompt(scene, style, st.session_state.visual_reference_description,
                                                scene['scene_idea'],
                                                mood=st.session_state.get('current_mood', 'dreamlike'),
-                                               total_scenes=len(scenes), story_idea=idea)
+                                               total_scenes=len(scenes), story_idea=idea,
+                                               story_mode=st.session_state.get('timeline_mode', 'continuous'))
                 scene['prompt'] = new_prompt
                 st.session_state[f'prompt_{index}'] = new_prompt
                 st.rerun()
