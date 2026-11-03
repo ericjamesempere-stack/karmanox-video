@@ -76,17 +76,22 @@ def create_scenes(lyrics, duration, style, ratio, idea):
         last = max(first + 1, math.ceil((index + 1) * len(lines) / count))
         excerpt = ' / '.join(lines[first:last]) if lines else idea
         prompt = (
-            f'Professional {style.lower()} music video, {ratio}. '
-            f'Scene {index + 1}, duration {end - start:.1f} seconds. '
-            f'Visual narrative inspired by: {excerpt or idea or "a cinematic journey"}. '
-            'Single continuous cinematic shot, realistic subject motion, expressive actions, '
-            'consistent character identity, outfit, environment and lighting. '
-            'No subtitles, no logos, no text, no watermark.'
+            f"{style}. {excerpt or idea or 'A cinematic scene'}. "
+            "Natural movement, one continuous shot, no text."
         )
         result.append({'start': start, 'end': end, 'lyrics': excerpt,
-                       'prompt': prompt, 'image': None, 'video': None,
+                       'prompt': prompt, 'scene_idea': '', 'image': None, 'video': None,
                        'last_frame': None, 'engine': next(iter(SERVICES))})
     return result
+
+
+def short_prompt(scene, style, custom_idea=""):
+    """Short, editable visual instruction, without unnecessary technical prose."""
+    concept = (custom_idea or scene["lyrics"] or "A cinematic moment").strip()
+    concept = re.sub(r"\\s+", " ", concept)
+    if len(concept) > 260:
+        concept = concept[:257].rsplit(" ", 1)[0] + "..."
+    return f"{concept}. {style}. Natural movement, one continuous shot, no text."
 
 
 def extract_last_frame(raw, extension):
@@ -235,6 +240,8 @@ if st.session_state.scenes:
     scenes = st.session_state.scenes
     st.subheader(f'3. Tes scènes ({len(scenes)})')
     st.caption('Répartition approximative des paroles : la synchronisation mot à mot nécessite des paroles horodatées.')
+    st.info("Prompts courts : chaque scène possède désormais un champ « Mon idée ». Une idée personnelle remplace la proposition automatique. Tu peux ensuite modifier librement le prompt.")
+
     st.markdown("### Production de scènes sélectionnées")
     st.caption("Lore Motion est prioritaire mais n'a pas d'API vérifiée ici. LTX peut être tenté directement : disponibilité non garantie.")
     if "scene_selection" not in st.session_state:
@@ -263,9 +270,18 @@ if st.session_state.scenes:
         with zipfile.ZipFile(buffer, "w") as archive:
             for j in chosen:
                 archive.writestr(f"scene_{j+1:02d}.txt", scenes[j]["prompt"])
+                image_data = scenes[j].get("image")
+                if not image_data and continuity and j > 0:
+                    image_data = scenes[j-1].get("last_frame")
+                if not image_data and reference:
+                    image_data = reference.getvalue()
+                if image_data:
+                    archive.writestr(f"scene_{j+1:02d}_reference.png", image_data)
         st.download_button("Télécharger tous les prompts sélectionnés", buffer.getvalue(),
                            "prompts_karmaclip.zip", "application/zip")
     retries = st.slider('Tentatives maximum par scène (LTX)', 1, 3, 2)
+    st.caption("Les sites tiers ne peuvent pas être préremplis automatiquement depuis Streamlit sans API compatible. Le ZIP contient désormais les prompts ET les images à fournir.")
+
     if st.button("🎬 Lancer les scènes sélectionnées" if automatic else "📋 Préparer les scènes sélectionnées", disabled=not chosen, use_container_width=True):
         if mode.startswith("Lore Motion"):
             st.warning("Lore Motion ne peut pas être lancé automatiquement depuis cette application sans API ou navigateur autorisé. Les prompts sont prêts à copier.")
@@ -316,8 +332,21 @@ if st.session_state.scenes:
         with st.expander(f'Scène {index + 1:02d} · {scene["start"]:.0f}–{scene["end"]:.0f} s'
                          + (' · ✅ vidéo prête' if scene['video'] else ''), expanded=(index == 0)):
             st.caption('Paroles : ' + (scene['lyrics'] or '—'))
-            scene['prompt'] = st.text_area('Prompt vidéo', value=scene['prompt'],
-                                           height=155, key=f'prompt_{index}')
+            scene['scene_idea'] = st.text_area(
+                '💡 Mon idée pour cette scène (facultatif)',
+                value=scene.get('scene_idea', ''),
+                placeholder='Ex. Deux bananes se regardent timidement en dansant.',
+                height=75, key=f'scene_idea_{index}'
+            )
+            if st.button('✨ Créer un prompt court à partir de mon idée', key=f'build_prompt_{index}',
+                         use_container_width=True):
+                new_prompt = short_prompt(scene, style, scene['scene_idea'])
+                scene['prompt'] = new_prompt
+                st.session_state[f'prompt_{index}'] = new_prompt
+                st.rerun()
+            scene['prompt'] = st.text_area('✏️ Prompt vidéo (modifiable)',
+                                           value=scene['prompt'], height=105,
+                                           key=f'prompt_{index}')
             st.code(scene['prompt'], language=None)
             st.caption('Appuie sur l’icône Copier du bloc ci-dessus, puis colle le prompt dans le moteur.')
             st.download_button('📋 Télécharger le prompt', scene['prompt'],
@@ -338,6 +367,16 @@ if st.session_state.scenes:
                 scene['image'] = image_file.getvalue()
             if scene['image']:
                 st.image(scene['image'], width=180)
+            active_image = (scene['image'] or
+                            (scenes[index-1]['last_frame'] if continuity and index > 0
+                             else None) or
+                            (reference.getvalue() if reference else None))
+            if active_image:
+                st.download_button('🖼️ Télécharger l’image à transmettre au moteur',
+                                   active_image, file_name=f'image_scene_{index+1:02d}.png',
+                                   mime='image/png', key=f'active_image_{index}',
+                                   use_container_width=True)
+
             names = list(SERVICES)
             selected = st.selectbox('Moteur vidéo', names, index=names.index(scene['engine']),
                                     key=f'engine_{index}')
