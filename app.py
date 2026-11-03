@@ -11,11 +11,11 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V8', page_icon='🎬', layout='wide')
+st.set_page_config(page_title='KarmaClip AI V9', page_icon='🎬', layout='wide')
 if "visual_reference_description" not in st.session_state:
     st.session_state.visual_reference_description = ""
 
-st.title('🎬 KarmaClip AI V8')
+st.title('🎬 KarmaClip AI V9')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
@@ -99,24 +99,101 @@ def describe_image(image_bytes, mime):
     return response.json()["choices"][0]["message"]["content"].strip()
 
 
-def image_guided_prompt(scene, style, reference_description, custom_idea=""):
-    action = (custom_idea or scene.get("lyrics") or "Move naturally in the scene").strip()
-    action = re.sub(r"\\s+", " ", action)
-    if len(action) > 210:
-        action = action[:207].rsplit(" ", 1)[0] + "..."
-    if reference_description.strip():
-        return (
-            f"Reference subjects (use the supplied image): {reference_description.strip()}. "
-            f"Scene action: {action}. Keep ALL original subjects, their number, "
-            f"identities, clothing and appearance unchanged. "
-            f"{style}. Natural motion, single shot, no text."
-        )
-    return f"{action}. {style}. Natural movement, one continuous shot, no text."
+def scene_mood(lyrics, index, count):
+    """Mood is a creative cue, not a literal restatement of lyrics."""
+    t = lyrics.lower()
+    if any(w in t for w in ["love", "amour", "heart", "coeur", "cœur", "kiss", "together"]):
+        return "romantic"
+    if any(w in t for w in ["alone", "lonely", "sad", "lost", "triste", "seul", "oubli"]):
+        return "melancholic"
+    if any(w in t for w in ["party", "dance", "danse", "groove", "move", "fiesta"]):
+        return "dance"
+    if any(w in t for w in ["fight", "fire", "rage", "combat", "liberty", "liberté"]):
+        return "power"
+    return "dreamlike"
+
+
+# Original short-film beats, not lyrics pasted into a prompt.
+BEATS = {
+    "dance": [
+        "The characters notice each other across the dance floor, exchanging shy glances while keeping their distance",
+        "Both characters begin a playful synchronized step, still dancing separately",
+        "One character makes a funny exaggerated move; the other answers with a teasing dance move",
+        "They circle each other in rhythm, smiling, without touching",
+        "Their movements become confident and perfectly synchronized",
+        "They reach toward one another and finally join hands, dancing together",
+    ],
+    "romantic": [
+        "The characters exchange a hesitant look, as if recognizing a familiar feeling",
+        "One character takes a small step closer; the other responds with a warm smile",
+        "They move around each other in a playful, gentle rhythm",
+        "A quiet pause brings their faces close; their expressions become sincere",
+        "They move side by side, naturally matching each other's pace",
+        "They join hands and share a joyful, spontaneous dance",
+    ],
+    "melancholic": [
+        "The character pauses in the middle of an ordinary action, distracted by a distant memory",
+        "A small object catches the character's attention; they turn it slowly in their hands",
+        "The character walks past familiar surroundings, noticing what has changed",
+        "They stop, look back briefly, then decide to keep moving",
+        "The character lifts their head and takes a more determined step",
+        "They continue forward with a subtle, genuine smile",
+    ],
+    "power": [
+        "The character plants their feet firmly and faces an unexpected challenge",
+        "They move forward with a steady, purposeful stride",
+        "A sudden obstacle forces a quick, energetic reaction",
+        "The character recovers balance and responds with renewed confidence",
+        "They make one decisive movement that changes the situation",
+        "The character stands tall, breathing deeply after the effort",
+    ],
+    "dreamlike": [
+        "The character notices a small unexpected detail in the surroundings and turns toward it",
+        "They follow the detail with curiosity, moving through the space",
+        "An unusual visual change surprises the character; they react naturally",
+        "They experiment with their surroundings in a playful, physical way",
+        "The character makes a confident choice and changes direction",
+        "The scene ends with a distinctive gesture that can connect to the next shot",
+    ],
+}
+
+
+def image_guided_prompt(scene, style, reference_description, custom_idea="", mood="dreamlike",
+                        total_scenes=1, story_idea=""):
+    """Direct a visible physical action. Lyrics inform mood, not the literal text."""
+    index = int(scene.get("index", 0))
+    beats = BEATS.get(mood, BEATS["dreamlike"])
+    if total_scenes <= 1:
+        beat = beats[0]
+    else:
+        beat_index = min(len(beats)-1, round(index * (len(beats)-1) / (total_scenes-1)))
+        beat = beats[beat_index]
+    variation = [
+        "A gentle tracking shot follows the movement",
+        "The camera slowly moves closer as the gesture unfolds",
+        "A side-angle shot emphasizes body language",
+        "The camera holds steady on the characters' reaction",
+        "A low-angle shot highlights the physical movement",
+        "The camera follows a small change in direction",
+    ][index % 6]
+    action = (custom_idea or (beat + ". " + variation)).strip()
+    action = re.sub(r"\\s+", " ", action)[:330]
+    subjects = reference_description.strip()
+    if subjects:
+        identity = f"Use the uploaded reference image. Same exact subjects: {subjects}. "
+        identity += "Keep the exact number of characters, faces, outfits, and colors. "
+    else:
+        identity = ("Use the uploaded reference image as the character and setting reference. "
+                    "Do not invent or remove subjects. ")
+    setting = (story_idea.strip()[:140] + ". ") if story_idea.strip() else ""
+    return (f"{identity}{setting}Action: {action}. "
+            f"One clear physical action, expressive natural movement, {style}, "
+            "single continuous shot, no captions, no new characters.")
 
 
 def create_scenes(lyrics, duration, style, ratio, idea, scene_length=5):
     lines = [line.strip() for line in lyrics.splitlines()
-             if line.strip() and not re.match(r'^\[.*\]$', line.strip())]
+             if line.strip() and not re.match(r'^\\[.*\\]$', line.strip())]
     count = min(240, max(1, math.ceil(duration / scene_length)))
     result = []
     for index in range(count):
@@ -124,24 +201,52 @@ def create_scenes(lyrics, duration, style, ratio, idea, scene_length=5):
         end = min(duration, start + scene_length)
         first = math.floor(index * len(lines) / count)
         last = max(first + 1, math.ceil((index + 1) * len(lines) / count))
-        excerpt = ' / '.join(lines[first:last]) if lines else idea
-        prompt = (
-            f"{style}. {excerpt or idea or 'A cinematic scene'}. "
-            "Natural movement, one continuous shot, no text."
-        )
-        result.append({'start': start, 'end': end, 'lyrics': excerpt,
-                       'prompt': prompt, 'scene_idea': '', 'image': None, 'video': None,
+        excerpt = ' / '.join(lines[first:last]) if lines else ""
+        result.append({'index': index, 'start': start, 'end': end, 'lyrics': excerpt,
+                       'prompt': '', 'scene_idea': '', 'image': None, 'video': None,
                        'last_frame': None, 'engine': next(iter(SERVICES))})
     return result
 
 
-def short_prompt(scene, style, custom_idea=""):
-    """Short, editable visual instruction, without unnecessary technical prose."""
-    concept = (custom_idea or scene["lyrics"] or "A cinematic moment").strip()
-    concept = re.sub(r"\\s+", " ", concept)
-    if len(concept) > 260:
-        concept = concept[:257].rsplit(" ", 1)[0] + "..."
-    return f"{concept}. {style}. Natural movement, one continuous shot, no text."
+def creative_storyboard_with_ai(scenes, lyrics, reference_description, idea, style, image_bytes=None, mime=None):
+    """Optional AI director. Image supplied to vision model when configured."""
+    key = st.secrets.get("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("Le réalisateur IA nécessite une clé API configurée.")
+    image_part = []
+    if image_bytes:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        image_part = [{"type": "image_url", "image_url": {
+            "url": f"data:{mime or 'image/jpeg'};base64,{encoded}", "detail": "low"
+        }}]
+    brief = (
+        "You are an inventive music-video director. Create a coherent visual narrative "
+        "with concrete actions by the EXACT characters in the reference image. "
+        "Never paraphrase, illustrate literally, quote or repeat song lyrics. "
+        "Translate the song's emotional journey into a playful, meaningful sequence of "
+        "VISUAL ACTIONS and evolving character relationships. "
+        "Respect all subjects, exact character count, outfits and appearance. "
+        "Each shot is about 5 seconds, a single physically achievable action. "
+        "Prompts concise (max 42 words), in English, visually specific, different "
+        "from one another, no text overlays. "
+        "Return ONLY JSON object with key 'prompts' holding an array of strings, "
+        f"exactly {len(scenes)} items.\n"
+        f"Characters description: {reference_description}\n"
+        f"Creative direction: {idea}\nStyle: {style}\n"
+        f"Lyrics (for emotional arc only): {lyrics[:11000]}\n"
+        f"Scene excerpts: {json.dumps([x['lyrics'] for x in scenes], ensure_ascii=False)}"
+    )
+    payload = {"model": "gpt-4o-mini", "messages": [
+        {"role": "user", "content": [{"type": "text", "text": brief}] + image_part}
+    ], "response_format": {"type": "json_object"}, "max_tokens": min(12000, max(1500, len(scenes)*85))}
+    response = requests.post("https://api.openai.com/v1/chat/completions",
+                             headers={"Authorization": f"Bearer {key}"},
+                             json=payload, timeout=120)
+    response.raise_for_status()
+    prompts = json.loads(response.json()["choices"][0]["message"]["content"])["prompts"]
+    if len(prompts) != len(scenes) or not all(isinstance(p,str) for p in prompts):
+        raise ValueError("Le réalisateur IA n'a pas renvoyé le bon nombre de scènes.")
+    return prompts
 
 
 def extract_last_frame(raw, extension):
@@ -278,6 +383,11 @@ with st.container(border=True):
             st.rerun()
         except Exception as exc:
             st.warning(f"Analyse automatique indisponible : {exc}")
+    st.selectbox("🎭 Ambiance de réalisation", [
+        "Automatique selon la chanson", "Danse et humour", "Romantique",
+        "Mélancolique", "Énergie et dépassement", "Onirique et surprenant"
+    ], key="director_mood")
+    st.caption("Le réalisateur transforme les émotions de la chanson en actions à l'écran ; il ne recopie pas les paroles.")
     if reference:
         st.caption("L'image de départ est jointe aux exports. Pour une fidélité visuelle réelle, choisis un moteur image-vers-vidéo et fournis-lui cette image.")
     if st.button('✨ Préparer toutes les scènes', type='primary', use_container_width=True):
@@ -285,15 +395,40 @@ with st.container(border=True):
             st.warning('Ajoute des paroles, une idée ou une image.')
         else:
             st.session_state.scenes = create_scenes(lyrics, duration, style, ratio, idea or ('Animate the provided reference character in a cinematic scene' if reference else ''), scene_length)
+            moods = {
+                "Danse et humour": "dance", "Romantique": "romantic",
+                "Mélancolique": "melancholic", "Énergie et dépassement": "power",
+                "Onirique et surprenant": "dreamlike"
+            }
+            selected_mood = moods.get(st.session_state.director_mood,
+                                      scene_mood(lyrics + " " + idea, 0, len(st.session_state.scenes)))
+            st.session_state.current_mood = selected_mood
             for generated_scene in st.session_state.scenes:
                 generated_scene["prompt"] = image_guided_prompt(
-                    generated_scene, style, st.session_state.visual_reference_description
+                    generated_scene, style, st.session_state.visual_reference_description,
+                    mood=selected_mood, total_scenes=len(st.session_state.scenes),
+                    story_idea=idea
                 )
-
             st.session_state.clip = None
             st.session_state.scene_selection = []
             st.session_state.select_all = False
             st.success(f'{len(st.session_state.scenes)} scènes préparées !')
+    if st.session_state.scenes and st.button("🎬 Réalisation IA avancée (facultatif, clé API nécessaire)",
+                                             use_container_width=True):
+        try:
+            with st.spinner("Le réalisateur imagine des actions et une histoire visuelle…"):
+                prompts = creative_storyboard_with_ai(
+                    st.session_state.scenes, lyrics, st.session_state.visual_reference_description,
+                    idea, style, reference.getvalue() if reference else None,
+                    reference.type if reference else None
+                )
+                for j, prompt in enumerate(prompts):
+                    st.session_state.scenes[j]["prompt"] = prompt
+                    st.session_state[f"prompt_{j}"] = prompt
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Réalisateur IA indisponible : {exc}")
+
 
 with st.container(border=True):
     st.subheader('2. Paramètres de production')
@@ -311,7 +446,7 @@ if st.session_state.scenes:
     scenes = st.session_state.scenes
     st.subheader(f'3. Tes scènes ({len(scenes)})')
     st.caption('Répartition approximative des paroles : la synchronisation mot à mot nécessite des paroles horodatées.')
-    st.info("Prompts courts : chaque scène possède désormais un champ « Mon idée ». Une idée personnelle remplace la proposition automatique. Tu peux ensuite modifier librement le prompt.")
+    st.info("Chaque prompt raconte une action visible. Les paroles orientent l'émotion, pas le texte du prompt. Tu peux remplacer chaque action par ton idée.")
 
     st.markdown("### 3A. Storyboard et prompts — avant la génération")
     st.caption("Modifie chaque prompt et chaque image avant de choisir les scènes à produire.")
@@ -327,7 +462,10 @@ if st.session_state.scenes:
             )
             if st.button('✨ Créer un prompt court à partir de mon idée', key=f'build_prompt_{index}',
                          use_container_width=True):
-                new_prompt = image_guided_prompt(scene, style, st.session_state.visual_reference_description, scene['scene_idea'])
+                new_prompt = image_guided_prompt(scene, style, st.session_state.visual_reference_description,
+                                               scene['scene_idea'],
+                                               mood=st.session_state.get('current_mood', 'dreamlike'),
+                                               total_scenes=len(scenes), story_idea=idea)
                 scene['prompt'] = new_prompt
                 st.session_state[f'prompt_{index}'] = new_prompt
                 st.rerun()
