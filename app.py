@@ -1,329 +1,236 @@
 import io
 import json
+import math
 import os
+import re
+import shutil
+import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
-import requests
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image
 
-st.set_page_config(page_title='TikTok Movie Casting', page_icon='🎬', layout='wide')
-st.title('🎬 TikTok Movie Casting')
-st.caption('Idée → histoire → prompt → vidéo | Gratuit selon les quotas des services')
+st.set_page_config(page_title='KarmaClip AI V2', page_icon='🎬', layout='wide')
+st.title('🎬 KarmaClip AI V2')
+st.caption('Paroles + musique → storyboard → scènes vidéo → clip final')
 
-SERVICES = {
-    'Wan AI': 'https://wan.video/',
-    'LTX / Hugging Face': 'https://huggingface.co/spaces/Lightricks/ltx-video-distilled',
-    'Kling AI': 'https://app.klingai.com/global/',
-    'Vidu AI': 'https://www.vidu.com/',
-}
+SERVICES = [
+    ('Lore Motion (prioritaire)', 'https://loremotion.com/'),
+    ('Wan2.Video', 'https://wan2.video/'),
+    ('Wan AI', 'https://wan.video/'),
+    ('LTX / Hugging Face', 'https://huggingface.co/spaces/Lightricks/ltx-video-distilled'),
+    ('NiftyVid', 'https://igorcsis.github.io/nifty-vid/'),
+    ('NOVA AI Video', 'https://novaos-original.github.io/nova-os-website/video-studio/ai-generator.html'),
+    ('Kling', 'https://app.klingai.com/global/'),
+    ('Vidu', 'https://www.vidu.com/'),
+]
+STYLE = ['Cinématique photoréaliste', 'Clip musical', 'Animation 3D', 'Fantastique', 'Vintage', 'Minimaliste']
+RATIOS = {'Vertical 9:16': (360, 640), 'Horizontal 16:9': (640, 360), 'Carré 1:1': (512, 512)}
+SCENE_SECONDS = 5.0
 
-RATIOS = {'TikTok 9:16': (360, 640), 'Cinéma 16:9': (640, 360), 'Carré 1:1': (512, 512)}
-STYLES = ['Cinématique réaliste', 'Clip musical', 'Animation 3D', 'Fantastique', 'Science-fiction', 'Manga', 'Horreur', 'Vintage']
-NEGATIVE = 'blurry, distorted, flickering, inconsistent motion, low quality, text, watermark'
+for key, value in {'scenes': [], 'clip': None, 'clip_error': '', 'project_id': None}.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
-def secret(name, default=''):
-    try:
-        return str(st.secrets.get(name, default)).strip()
-    except Exception:
-        return default
+def ffmpeg_exists():
+    return bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
 
 
-def gemini(prompt):
-    key = secret('GEMINI_API_KEY')
-    if not key:
-        raise RuntimeError('Clé Gemini absente : utilise le prompt manuel ci-dessous.')
-    models = list(dict.fromkeys([secret('GEMINI_MODEL', 'gemini-2.5-flash').replace('models/', ''), 'gemini-2.5-flash-lite']))
-    errors = []
-    for model in models:
+def audio_duration(raw, suffix):
+    if suffix == '.wav':
         try:
-            r = requests.post(
-                f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
-                headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
-                json={'contents': [{'parts': [{'text': prompt}]}], 'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 1800}},
-                timeout=(4, 12),
-            )
-            if r.status_code in (401, 403):
-                raise RuntimeError('Clé Gemini refusée.')
-            if r.status_code == 429:
-                errors.append('Quota Gemini atteint')
-                continue
-            r.raise_for_status()
-            chunks = [p['text'] for c in r.json().get('candidates', []) for p in c.get('content', {}).get('parts', []) if p.get('text')]
-            if chunks:
-                return '\n'.join(chunks).strip()
-            errors.append(f'{model}: aucune réponse textuelle')
-        except (requests.RequestException, ValueError) as exc:
-            errors.append(f'{model}: {str(exc)[:120]}')
-    raise RuntimeError('; '.join(errors) or 'Gemini indisponible')
-
-
-def locate_video(obj):
-    if isinstance(obj, (str, Path)):
-        v = str(obj)
-        return v if v.lower().split('?')[0].endswith(('.mp4', '.webm')) else None
-    if isinstance(obj, dict):
-        for item in obj.values():
-            found = locate_video(item)
-            if found:
-                return found
-    if isinstance(obj, (tuple, list)):
-        for item in obj:
-            found = locate_video(item)
-            if found:
-                return found
-    return None
-
-
-def ltx_video(prompt, image_bytes, image_name, ratio, duration):
-    from gradio_client import Client, handle_file
-    # La signature de l'API publique du Space peut changer : erreur affichée sans masquer l'échec.
-    if ratio == 'TikTok 9:16':
-        h, w = 704, 384
-    elif ratio == 'Cinéma 16:9':
-        h, w = 384, 704
-    else:
-        h, w = 512, 512
-    tmp = None
-    try:
-        mode = 'text-to-video'
-        api = '/text_to_video'
-        image_arg = None
-        if image_bytes:
-            suffix = Path(image_name).suffix.lower()
-            if suffix not in ('.png', '.jpg', '.jpeg', '.webp'):
-                suffix = '.png'
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(image_bytes)
-                tmp = f.name
-            image_arg = handle_file(tmp)
-            mode = 'image-to-video'
-            api = '/image_to_video'
-        token = secret('HF_TOKEN')
-        client = Client('Lightricks/ltx-video-distilled', token=token or None, verbose=False)
-        result = client.predict(prompt, NEGATIVE, image_arg, None, h, w, mode, float(duration), 9, 42, True, 3.0, False, api_name=api)
-        path = locate_video(result)
-        if not path:
-            raise RuntimeError('Le générateur n’a renvoyé aucun fichier vidéo.')
-        ext = '.webm' if path.lower().split('?')[0].endswith('.webm') else '.mp4'
-        if path.startswith(('https://', 'http://')):
-            with requests.get(path, timeout=120, stream=True) as r:
-                r.raise_for_status()
-                parts, total = [], 0
-                for chunk in r.iter_content(1024 * 1024):
-                    total += len(chunk)
-                    if total > 100 * 1024 * 1024:
-                        raise RuntimeError('Vidéo trop volumineuse (100 Mo maximum).')
-                    parts.append(chunk)
-                return b''.join(parts), ext
-        p = Path(path)
-        if p.stat().st_size > 100 * 1024 * 1024:
-            raise RuntimeError('Vidéo trop volumineuse (100 Mo maximum).')
-        return p.read_bytes(), ext
-    finally:
-        if tmp:
-            Path(tmp).unlink(missing_ok=True)
-
-
-def animate_images(images, ratio, seconds=4, motion='Zoom avant'):
-    import numpy as np
-    import imageio.v2 as imageio
-    w, h = RATIOS[ratio]
-    fps = 16
-    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
-        path = f.name
-    try:
-        writer = imageio.get_writer(path, fps=fps, codec='libx264', quality=7, macro_block_size=2, ffmpeg_log_level='error')
-        try:
-            for raw in images:
-                with Image.open(io.BytesIO(raw)) as im:
-                    source = ImageOps.exif_transpose(im).convert('RGB')
-                base = ImageOps.fit(source, (round(w * 1.2), round(h * 1.2)), method=Image.Resampling.LANCZOS)
-                for frame in range(seconds * fps):
-                    t = frame / max(1, seconds * fps - 1)
-                    if motion == 'Travelling horizontal':
-                        current = base
-                        x = round((current.width - w) * t)
-                    else:
-                        factor = (1 + 0.12 * t) if motion == 'Zoom avant' else (1.12 - 0.12 * t)
-                        current = base.resize((round(base.width * factor), round(base.height * factor)), Image.Resampling.BICUBIC)
-                        x = (current.width - w) // 2
-                    y = (current.height - h) // 2
-                    writer.append_data(np.asarray(current.crop((x, y, x + w, y + h))))
-        finally:
-            writer.close()
-        return Path(path).read_bytes()
-    finally:
-        Path(path).unlink(missing_ok=True)
-
-
-def font(size):
-    for p in ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf']:
-        try:
-            return ImageFont.truetype(p, size)
-        except OSError:
+            import wave
+            with wave.open(io.BytesIO(raw), 'rb') as wav:
+                return wav.getnframes() / wav.getframerate()
+        except Exception:
             pass
-    return ImageFont.load_default()
-
-
-def poster(raw, title, artist, ratio):
-    w, h = RATIOS[ratio]
-    with Image.open(io.BytesIO(raw)) as im:
-        image = ImageOps.fit(ImageOps.exif_transpose(im).convert('RGB'), (w * 2, h * 2), method=Image.Resampling.LANCZOS)
-    draw = ImageDraw.Draw(image, 'RGBA')
-    draw.rectangle((0, round(h * 1.5), w * 2, h * 2), fill=(0, 0, 0, 180))
-    for label, y, size in [(title[:55], 1.7, max(20, w // 8)), (artist[:55], 1.87, max(15, w // 14))]:
-        if not label:
-            continue
-        f = font(size)
-        while size > 15 and draw.textbbox((0, 0), label, font=f)[2] > w * 1.85:
-            size -= 2
-            f = font(size)
-        draw.text((w, round(h * y)), label, fill='white', font=f, anchor='mm')
-    out = io.BytesIO()
-    image.save(out, format='PNG')
-    return out.getvalue()
-
-
-for k, v in {'story': '', 'video_prompt': '', 'analysis': '', 'scenarios': '', 'video_bytes': None, 'video_ext': '.mp4', 'poster_bytes': None, 'last_error': ''}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-with st.container(border=True):
-    st.subheader('1. Ton idée')
-    keywords = st.text_input('Écris 3 ou 4 mots', placeholder='Ex. tigre, liberté, nuit, danse')
-    title = st.text_input('Titre (facultatif)', value='Mon clip')
-    style = st.selectbox('Style', STYLES)
-    ratio = st.selectbox('Format', list(RATIOS))
-    reference = st.file_uploader('Image de référence (facultative)', type=['png', 'jpg', 'jpeg', 'webp'])
-    image_bytes = reference.getvalue() if reference else None
-    if image_bytes and len(image_bytes) > 10 * 1024 * 1024:
-        st.error('Image supérieure à 10 Mo.')
-        image_bytes = None
-    if image_bytes:
-        st.image(image_bytes, caption='Image de référence', width=250)
-
-base_prompt = f'''Create one coherent cinematic 5-second video shot, {style}, {ratio}.
-Story keywords: {keywords or 'a surprising cinematic journey'}.
-One continuous camera move, natural detailed subject movement, consistent face and character identity, clear beginning and ending, beautiful lighting, professional music-video cinematography. No captions, no lettering, no logos.'''
-
-with st.container(border=True):
-    st.subheader('2. Histoire et prompt')
-    if st.button('✨ Créer automatiquement une histoire', type='primary', use_container_width=True):
-        if not keywords.strip():
-            st.warning('Écris quelques mots pour commencer.')
-        else:
-            instruction = f'''Écris en français une histoire visuelle originale et concise (80 à 130 mots) à partir de ces mots : {keywords}. Style : {style}. Puis écris sous le titre VIDEO PROMPT un seul prompt anglais précis pour une vidéo IA de 5 secondes, plan unique, mouvement réel des personnages, continuité visuelle, sans texte à l’écran. Évite les clichés.'''
-            try:
-                with st.spinner('Création de l’histoire...'):
-                    st.session_state.story = gemini(instruction)
-                st.session_state.video_prompt = base_prompt + '\nStory: ' + st.session_state.story[:1000]
-                st.success('Histoire créée.')
-            except Exception as exc:
-                st.info(f'Gemini indisponible ({str(exc)[:160]}). Histoire et prompt créés localement, sans attendre davantage.')
-                st.session_state.story = (
-                    f'{title}. {keywords.strip().capitalize()}. '
-                    f'Une scène {style.lower()} prend vie dans un plan continu. '
-                    'La caméra découvre le sujet, suit un mouvement naturel puis révèle '
-                    'un détail inattendu qui relie les éléments de départ. '
-                    'La lumière et le rythme évoluent progressivement jusqu’à une image finale marquante.'
-                )
-                st.session_state.video_prompt = base_prompt
-    st.session_state.story = st.text_area('Ton histoire (modifiable)', value=st.session_state.story, height=145)
-    st.session_state.video_prompt = st.text_area('Prompt vidéo (modifiable)', value=st.session_state.video_prompt or base_prompt, height=165)
-    st.caption('Pour copier sur Android : appui long sur le prompt, puis Copier.')
-
-with st.container(border=True):
-    st.subheader('3. Générer la vidéo')
-    mode = st.radio('Choix du générateur', ['Automatique', 'Manuel'], horizontal=True)
-    st.caption('Automatique : tentative LTX si son API est disponible. En cas d’échec, secours MP4 animé uniquement si une image est fournie. Wan, Kling et Vidu sont proposés en mode manuel tant que leurs interfaces gratuites ne donnent pas accès à une API vérifiée. Aucune API payante n’est appelée.')
-    duration = st.slider('Durée IA (secondes)', 2.0, 8.0, 5.0, 0.5)
-    choice = st.selectbox('Générateur manuel', list(SERVICES)) if mode == 'Manuel' else None
-    if choice:
-        st.link_button(f'🌐 Ouvrir {choice}', SERVICES[choice], use_container_width=True)
-        st.info('Copie le prompt ci-dessus et colle-le sur ce service. Les limites gratuites varient selon le compte et le fournisseur.')
-    if st.button('🎥 Lancer la génération', type='primary', use_container_width=True):
-        st.session_state.last_error = ''
-        if not keywords.strip() and not st.session_state.video_prompt.strip():
-            st.warning('Saisis ton idée.')
-        elif mode == 'Manuel' and choice != 'LTX / Hugging Face':
-            st.info(f'Ouvre {choice} avec le bouton ci-dessus pour lancer la génération manuelle. Aucun prélèvement automatique n’est effectué par cette application.')
-        else:
-            st.session_state.video_bytes = None
-            st.session_state.last_error = ''
-            try:
-                with st.spinner('Tentative de génération IA LTX...'):
-                    data, ext = ltx_video(st.session_state.video_prompt or base_prompt, image_bytes, reference.name if reference else '', ratio, duration)
-                st.session_state.video_bytes, st.session_state.video_ext = data, ext
-                st.success('Vidéo IA générée !')
-            except Exception as exc:
-                st.session_state.last_error = str(exc)[:400]
-                st.warning('LTX indisponible : ' + st.session_state.last_error)
-                if mode == 'Automatique' and image_bytes:
-                    try:
-                        with st.spinner('Création du MP4 de secours...'):
-                            st.session_state.video_bytes = animate_images([image_bytes], ratio)
-                            st.session_state.video_ext = '.mp4'
-                        st.success('MP4 animé de secours créé (mouvement de caméra, pas de gestes IA).')
-                    except Exception as fallback_exc:
-                        st.error('Secours MP4 impossible : ' + str(fallback_exc)[:250])
-                elif mode == 'Automatique':
-                    st.info('Ajoute une image pour obtenir un MP4 animé de secours, ou utilise un générateur manuel.')
-    # Accès directs disponibles même après un échec API ou un quota épuisé.
-    if st.session_state.last_error:
-        st.info('La génération automatique est indisponible pour le moment. Choisis un site ci-dessous et colle le prompt vidéo préparé.')
-    st.markdown('#### 🌐 Générateurs vidéo — accès direct')
-    st.caption('Ces boutons ouvrent les sites. Ils ne déclenchent ni abonnement ni paiement. Vérifie le quota gratuit proposé sur ton compte avant de lancer une génération.')
-    col1, col2 = st.columns(2)
-    for idx, (service_name, service_url) in enumerate(SERVICES.items()):
-        with (col1 if idx % 2 == 0 else col2):
-            st.link_button('↗ ' + service_name, service_url, use_container_width=True)
-    st.code(st.session_state.video_prompt or base_prompt, language=None)
-    st.caption('Copie ce prompt pour le coller dans Wan, LTX, Kling ou Vidu.')
-    if st.session_state.video_bytes:
-        st.video(st.session_state.video_bytes)
-        ext = st.session_state.video_ext
-        st.download_button('⬇️ Télécharger ma vidéo', st.session_state.video_bytes, file_name='mon_clip' + ext, mime='video/webm' if ext == '.webm' else 'video/mp4', use_container_width=True)
-
-with st.expander('🎞️ Clip MP4 gratuit à partir de plusieurs images'):
-    pictures = st.file_uploader('Images du clip', type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True, key='slideshow')
-    sec = st.slider('Secondes par image', 2, 8, 4)
-    motion = st.selectbox('Mouvement', ['Zoom avant', 'Zoom arrière', 'Travelling horizontal'])
-    if st.button('Créer le clip MP4', use_container_width=True):
-        if not pictures:
-            st.warning('Ajoute au moins une image.')
-        elif len(pictures) > 20:
-            st.warning('Maximum 20 images.')
-        else:
-            try:
-                with st.spinner('Encodage du MP4...'):
-                    st.session_state.video_bytes = animate_images([p.getvalue() for p in pictures], ratio, sec, 'Zoom arriere' if motion == 'Zoom arrière' else motion)
-                    st.session_state.video_ext = '.mp4'
-                st.success('Clip créé. Télécharge-le dans la section vidéo ci-dessus.')
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc)[:300])
-
-with st.expander('🎨 Affiche de film ou pochette'):
-    st.caption('Sans abonnement : crée une image dans Bing, puis importe-la ici pour ajouter le titre.')
-    st.code(f'Professional {style} movie poster, story: {st.session_state.story or keywords}, {ratio}, detailed cinematic lighting, no text, no watermark', language='text')
-    st.link_button('Ouvrir Bing Image Creator', 'https://www.bing.com/images/create')
-    poster_upload = st.file_uploader('Importer une image', type=['png', 'jpg', 'jpeg', 'webp'], key='poster')
-    artist = st.text_input('Nom de l’artiste', value='KarManoX')
-    if st.button('Finaliser mon affiche') and poster_upload:
+    if not ffmpeg_exists():
+        return None
+    with tempfile.TemporaryDirectory() as directory:
+        p = Path(directory) / ('song' + suffix)
+        p.write_bytes(raw)
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', str(p)], capture_output=True, text=True, timeout=30)
         try:
-            st.session_state.poster_bytes = poster(poster_upload.getvalue(), title, artist, ratio)
+            return float(result.stdout.strip())
+        except ValueError:
+            return None
+
+
+def make_scenes(lyrics, seconds, style, ratio, idea):
+    count = min(240, max(1, math.ceil(seconds / SCENE_SECONDS)))
+    # Approximation only: without timestamps, lyrics cannot be synchronized to vocals.
+    lines = [x.strip() for x in lyrics.splitlines() if x.strip() and not re.match(r'^\s*\[.*\]\s*$', x)]
+    scenes = []
+    for i in range(count):
+        start = i * SCENE_SECONDS
+        end = min(seconds, (i + 1) * SCENE_SECONDS)
+        first = math.floor(i * len(lines) / count) if lines else 0
+        last = max(first + 1, math.ceil((i + 1) * len(lines) / count)) if lines else 0
+        excerpt = ' / '.join(lines[first:last]) if lines else idea
+        prompt = (f'Professional {style.lower()} music video, {ratio}. '
+                  f'Scene {i+1}, time {start:.1f}-{end:.1f} seconds. '
+                  f'Visual narrative: {excerpt or idea or "cinematic journey"}. '
+                  'One coherent 5-second shot, natural physical movement, clear camera direction, '
+                  'consistent character identity, outfit, location and lighting. '
+                  'No subtitles, no text, no watermark.')
+        scenes.append({'start': start, 'end': end, 'lyrics': excerpt, 'prompt': prompt,
+                       'video': None, 'image': None, 'last_frame': None, 'engine': None})
+    return scenes
+
+
+def last_frame(data, ext):
+    if not ffmpeg_exists():
+        return None
+    with tempfile.TemporaryDirectory() as directory:
+        src = Path(directory) / ('scene' + ext)
+        dst = Path(directory) / 'last.png'
+        src.write_bytes(data)
+        result = subprocess.run(['ffmpeg', '-y', '-sseof', '-0.08', '-i', str(src), '-frames:v', '1', str(dst)],
+                                capture_output=True, timeout=45)
+        return dst.read_bytes() if result.returncode == 0 and dst.exists() else None
+
+
+def assemble(scenes, music, music_ext, ratio):
+    if not ffmpeg_exists():
+        raise RuntimeError('FFmpeg/FFprobe sont requis pour assembler les scènes.')
+    if not all(s['video'] for s in scenes):
+        raise RuntimeError('Importe une vidéo pour chaque scène avant de lancer le montage.')
+    w, h = RATIOS[ratio]
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        normalized = []
+        for i, s in enumerate(scenes):
+            data, ext = s['video']
+            source = directory / f'source_{i}{ext}'
+            output = directory / f'part_{i}.mp4'
+            source.write_bytes(data)
+            duration = max(0.1, s['end'] - s['start'])
+            vf = (f'scale={w}:{h}:force_original_aspect_ratio=increase,'
+                  f'crop={w}:{h},fps=24,setsar=1,format=yuv420p')
+            cmd = ['ffmpeg', '-y', '-i', str(source), '-t', str(duration), '-an', '-vf', vf,
+                   '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-movflags', '+faststart', str(output)]
+            result = subprocess.run(cmd, capture_output=True, timeout=180)
+            if result.returncode != 0:
+                raise RuntimeError(f'Erreur vidéo scène {i+1}: {result.stderr.decode(errors="replace")[-350:]}')
+            normalized.append(output)
+        concat = directory / 'files.txt'
+        concat.write_text(''.join(f"file '{p.as_posix()}'\n" for p in normalized), encoding='utf-8')
+        silent = directory / 'silent.mp4'
+        result = subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', str(concat), '-c', 'copy', str(silent)], capture_output=True, timeout=180)
+        if result.returncode != 0:
+            raise RuntimeError('Impossible de réunir les scènes vidéo.')
+        if music:
+            audio = directory / ('audio' + music_ext)
+            audio.write_bytes(music)
+            final = directory / 'clip_final.mp4'
+            result = subprocess.run(['ffmpeg', '-y', '-i', str(silent), '-i', str(audio), '-map', '0:v:0', '-map', '1:a:0',
+                                     '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', str(final)],
+                                    capture_output=True, timeout=180)
+            if result.returncode != 0:
+                raise RuntimeError('Impossible d’ajouter la musique au montage.')
+            return final.read_bytes()
+        return silent.read_bytes()
+
+
+with st.container(border=True):
+    st.subheader('1. Ta chanson')
+    title = st.text_input('Titre du clip', value='Mon clip')
+    artist = st.text_input('Artiste', value='KarManoX')
+    lyrics = st.text_area('Paroles de la chanson (facultatives si tu décris ton idée)', height=180,
+                          placeholder='Colle ici les paroles complètes…')
+    idea = st.text_area('Idée / histoire du clip (facultatif)', height=75)
+    music_file = st.file_uploader('Musique WAV ou MP3 (facultative)', type=['wav', 'mp3'])
+    music = music_file.getvalue() if music_file else None
+    music_ext = Path(music_file.name).suffix.lower() if music_file else ''
+    duration_found = audio_duration(music, music_ext) if music else None
+    if duration_found:
+        st.success(f'Durée audio détectée : {duration_found:.1f} secondes')
+    elif music:
+        st.warning('Durée audio non détectée : renseigne la durée manuellement.')
+    duration = st.number_input('Durée de la chanson en secondes (si audio absent ou non détecté)', min_value=5, max_value=1200, value=180, step=5)
+    actual_duration = duration_found or float(duration)
+    style = st.selectbox('Style visuel', STYLE)
+    ratio = st.selectbox('Format vidéo', list(RATIOS))
+    reference = st.file_uploader('Image de référence facultative', type=['png', 'jpg', 'jpeg', 'webp'])
+    if reference:
+        st.image(reference, width=200)
+    if st.button('✨ Préparer toutes les scènes', type='primary', use_container_width=True):
+        if not lyrics.strip() and not idea.strip():
+            st.warning('Ajoute des paroles ou une idée.')
+        else:
+            st.session_state.scenes = make_scenes(lyrics, actual_duration, style, ratio, idea)
+            st.session_state.clip = None
+            st.success(f'{len(st.session_state.scenes)} scènes préparées.')
+
+with st.container(border=True):
+    st.subheader('2. Production et moteurs')
+    automatic = st.checkbox('Activer la production automatique', value=False,
+                            help='Désactivée par défaut. Aucun fournisseur externe n’est lancé sans intégration autorisée.')
+    fallback = st.checkbox('Basculement automatique entre moteurs compatibles', value=True)
+    continuity = st.checkbox('Continuité : reprendre la dernière image de la scène précédente', value=True)
+    st.info('Lore Motion reste prioritaire. Les services externes sont accessibles manuellement. '
+            'Le pilotage automatique de leurs sites n’est pas disponible sans API autorisée et vérifiée. '
+            'Cocher Automatique ne contourne pas les quotas et ne lance pas les sites externes.')
+    if automatic:
+        st.warning('Aucun connecteur vidéo automatique compatible n’est configuré dans cette version. '
+                   'Les scènes restent prêtes pour une intégration ultérieure.')
+    st.caption('Ordre de priorité des services :')
+    for name, url in SERVICES:
+        st.link_button('↗ ' + name, url, use_container_width=True)
+
+if st.session_state.scenes:
+    scenes = st.session_state.scenes
+    st.subheader(f'3. Storyboard — {len(scenes)} scènes')
+    st.caption('Les paroles sont réparties approximativement. Sans transcription horodatée, ce n’est pas une synchronisation exacte avec le chant.')
+    for i, scene in enumerate(scenes):
+        with st.expander(f'Scène {i+1:02d} · {scene["start"]:.0f}–{scene["end"]:.0f} s' + (' · ✅ vidéo importée' if scene['video'] else ''), expanded=(i == 0)):
+            st.caption('Paroles associées : ' + (scene['lyrics'] or '—'))
+            scene['prompt'] = st.text_area('Prompt vidéo (modifiable)', value=scene['prompt'], key=f'prompt_{i}', height=145)
+            st.code(scene['prompt'], language=None)
+            if continuity and i > 0 and scenes[i-1]['last_frame']:
+                st.image(scenes[i-1]['last_frame'], caption='Image de départ proposée : dernière image de la scène précédente', width=220)
+                st.download_button('Télécharger cette image de raccord', scenes[i-1]['last_frame'], file_name=f'raccord_{i+1:02d}.png', mime='image/png', key=f'frame_{i}')
+            elif reference and (i == 0 or not continuity):
+                st.image(reference.getvalue(), caption='Image de référence', width=180)
+            img = st.file_uploader('Image de départ de cette scène (facultative)', type=['png', 'jpg', 'jpeg', 'webp'], key=f'image_{i}')
+            if img:
+                scene['image'] = img.getvalue()
+            if scene['image']:
+                st.image(scene['image'], width=180)
+            service_name = st.selectbox('Moteur utilisé', [x[0] for x in SERVICES], key=f'engine_{i}')
+            scene['engine'] = service_name
+            service_url = dict(SERVICES)[service_name]
+            st.link_button('🌐 Ouvrir le moteur pour cette scène', service_url)
+            video = st.file_uploader('Importer la vidéo MP4/WEBM générée', type=['mp4', 'webm'], key=f'video_{i}')
+            if video:
+                scene['video'] = (video.getvalue(), Path(video.name).suffix.lower())
+                scene['last_frame'] = last_frame(*scene['video'])
+            if scene['video']:
+                st.video(scene['video'][0])
+                if scene['last_frame']:
+                    st.image(scene['last_frame'], caption='Dernière image extraite', width=180)
+                elif not ffmpeg_exists():
+                    st.caption('Extraction de la dernière image indisponible sans FFmpeg.')
+    project = {'title': title, 'artist': artist, 'duration': actual_duration, 'style': style, 'ratio': ratio,
+               'primary_service': 'Lore Motion', 'fallback_enabled': fallback, 'continuity_enabled': continuity,
+               'scenes': [{k: v for k, v in s.items() if k not in ('video', 'image', 'last_frame')} for s in scenes]}
+    st.download_button('📦 Télécharger le storyboard JSON', json.dumps(project, ensure_ascii=False, indent=2),
+                       file_name='karmaclip_storyboard.json', mime='application/json', use_container_width=True)
+    if st.button('🎞️ Assembler le clip MP4', type='primary', use_container_width=True):
+        try:
+            with st.spinner('Montage vidéo en cours…'):
+                st.session_state.clip = assemble(scenes, music, music_ext, ratio)
+            st.success('Clip final assemblé !')
         except Exception as exc:
-            st.error(str(exc)[:200])
-    if st.session_state.poster_bytes:
-        st.image(st.session_state.poster_bytes, width=300)
-        st.download_button('⬇️ Télécharger mon affiche', st.session_state.poster_bytes, file_name='affiche.png', mime='image/png')
+            st.error(str(exc))
+    if st.session_state.clip:
+        st.video(st.session_state.clip)
+        st.download_button('⬇️ Télécharger le clip final', st.session_state.clip,
+                           file_name='karmaclip_final.mp4', mime='video/mp4', use_container_width=True)
+else:
+    st.caption('Prépare le storyboard à l’étape 1 pour afficher les scènes.')
 
-with st.expander('📦 Exporter le projet'):
-    data = {'titre': title, 'mots': keywords, 'style': style, 'format': ratio, 'histoire': st.session_state.story, 'prompt_video': st.session_state.video_prompt}
-    st.download_button('Télécharger le projet JSON', json.dumps(data, ensure_ascii=False, indent=2), file_name='projet.json', mime='application/json')
-    st.download_button('Télécharger le prompt TXT', st.session_state.video_prompt or base_prompt, file_name='prompt_video.txt')
-
-st.caption('Aucun abonnement ni achat automatique. Les quotas et conditions des services externes restent applicables.')
+st.caption('Les services externes conservent leurs propres conditions, quotas et tarifs. Aucune génération illimitée n’est garantie.')
