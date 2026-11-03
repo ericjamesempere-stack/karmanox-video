@@ -1,4 +1,6 @@
 import io
+import base64
+import requests
 import json
 import math
 import re
@@ -10,6 +12,9 @@ from pathlib import Path
 import streamlit as st
 
 st.set_page_config(page_title='KarmaClip AI V4', page_icon='🎬', layout='wide')
+if "visual_reference_description" not in st.session_state:
+    st.session_state.visual_reference_description = ""
+
 st.title('🎬 KarmaClip AI V4')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
@@ -62,6 +67,51 @@ def audio_duration(raw, extension):
             return float(result.stdout.strip())
         except ValueError:
             return None
+
+
+def describe_image(image_bytes, mime):
+    """Optional visual analysis using a configured OpenAI API key."""
+    key = st.secrets.get("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("Aucune clé OPENAI_API_KEY configurée dans les secrets Streamlit.")
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": (
+                "Describe this reference image in concise English for a music video. "
+                "Identify the exact number and type of visible main subjects, clothing, "
+                "colors, appearance, relationships and setting. Do not invent details. "
+                "Maximum 65 words, no instructions or markdown."
+            )},
+            {"type": "image_url", "image_url": {
+                "url": f"data:{mime};base64,{encoded}", "detail": "low"
+            }}
+        ]}],
+        "max_tokens": 140
+    }
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json=payload, timeout=45
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def image_guided_prompt(scene, style, reference_description, custom_idea=""):
+    action = (custom_idea or scene.get("lyrics") or "Move naturally in the scene").strip()
+    action = re.sub(r"\\s+", " ", action)
+    if len(action) > 210:
+        action = action[:207].rsplit(" ", 1)[0] + "..."
+    if reference_description.strip():
+        return (
+            f"Reference subjects: {reference_description.strip()}. "
+            f"Action: {action}. Keep ALL original subjects, their number, "
+            f"identities, clothing and appearance unchanged. "
+            f"{style}. Natural motion, single shot, no text."
+        )
+    return f"{action}. {style}. Natural movement, one continuous shot, no text."
 
 
 def create_scenes(lyrics, duration, style, ratio, idea):
@@ -214,11 +264,31 @@ with st.container(border=True):
                                  type=['png', 'jpg', 'jpeg', 'webp'])
     if reference:
         st.image(reference.getvalue(), width=200)
+    st.text_area(
+        "🖼️ Description des personnages de l'image (commune à toutes les scènes)",
+        placeholder="Ex. Two anthropomorphic bananas: one in a black suit, one in a red evening dress. Both dancing at a party.",
+        height=95, key="visual_reference_description"
+    )
+    if reference and st.button("🔎 Analyser automatiquement mon image (si vision configurée)"):
+        try:
+            mime = reference.type or "image/jpeg"
+            st.session_state.visual_reference_description = describe_image(reference.getvalue(), mime)
+            st.success("Image analysée : vérifie la description puis prépare les scènes.")
+            st.rerun()
+        except Exception as exc:
+            st.warning(f"Analyse automatique indisponible : {exc}")
+    if reference:
+        st.caption("L'image de départ est jointe aux exports. Pour une fidélité visuelle réelle, choisis un moteur image-vers-vidéo et fournis-lui cette image.")
     if st.button('✨ Préparer toutes les scènes', type='primary', use_container_width=True):
         if not lyrics.strip() and not idea.strip() and not reference:
             st.warning('Ajoute des paroles, une idée ou une image.')
         else:
             st.session_state.scenes = create_scenes(lyrics, duration, style, ratio, idea or ('Animate the provided reference character in a cinematic scene' if reference else ''))
+            for generated_scene in st.session_state.scenes:
+                generated_scene["prompt"] = image_guided_prompt(
+                    generated_scene, style, st.session_state.visual_reference_description
+                )
+
             st.session_state.clip = None
             st.session_state.scene_selection = []
             st.session_state.select_all = False
@@ -325,101 +395,4 @@ if st.session_state.scenes:
                 data, ext = scene['video']
                 zf.writestr(f'scene_{i+1:03d}{ext}', data)
                 if scene['last_frame']:
-                    zf.writestr(f'scene_{i+1:03d}_last.png', scene['last_frame'])
-        st.download_button('💾 Sauvegarder les scènes terminées (ZIP)', backup.getvalue(),
-                           'karmaclip_scenes.zip', 'application/zip', use_container_width=True)
-    for index, scene in enumerate(scenes):
-        with st.expander(f'Scène {index + 1:02d} · {scene["start"]:.0f}–{scene["end"]:.0f} s'
-                         + (' · ✅ vidéo prête' if scene['video'] else ''), expanded=(index == 0)):
-            st.caption('Paroles : ' + (scene['lyrics'] or '—'))
-            scene['scene_idea'] = st.text_area(
-                '💡 Mon idée pour cette scène (facultatif)',
-                value=scene.get('scene_idea', ''),
-                placeholder='Ex. Deux bananes se regardent timidement en dansant.',
-                height=75, key=f'scene_idea_{index}'
-            )
-            if st.button('✨ Créer un prompt court à partir de mon idée', key=f'build_prompt_{index}',
-                         use_container_width=True):
-                new_prompt = short_prompt(scene, style, scene['scene_idea'])
-                scene['prompt'] = new_prompt
-                st.session_state[f'prompt_{index}'] = new_prompt
-                st.rerun()
-            scene['prompt'] = st.text_area('✏️ Prompt vidéo (modifiable)',
-                                           value=scene['prompt'], height=105,
-                                           key=f'prompt_{index}')
-            st.code(scene['prompt'], language=None)
-            st.caption('Appuie sur l’icône Copier du bloc ci-dessus, puis colle le prompt dans le moteur.')
-            st.download_button('📋 Télécharger le prompt', scene['prompt'],
-                               file_name=f'prompt_scene_{index + 1:02d}.txt',
-                               mime='text/plain', key=f'prompt_file_{index}',
-                               use_container_width=True)
-            if continuity and index > 0 and scenes[index - 1]['last_frame']:
-                frame = scenes[index - 1]['last_frame']
-                st.image(frame, caption='Dernière image de la scène précédente', width=230)
-                st.download_button('⬇️ Télécharger l’image de raccord', frame,
-                                   file_name=f'raccord_scene_{index + 1:02d}.png',
-                                   mime='image/png', key=f'raccord_{index}')
-            elif reference and (index == 0 or not continuity):
-                st.image(reference.getvalue(), caption='Image de référence', width=180)
-            image_file = st.file_uploader('Image de départ de cette scène (facultative)',
-                                          type=['png', 'jpg', 'jpeg', 'webp'], key=f'image_{index}')
-            if image_file:
-                scene['image'] = image_file.getvalue()
-            if scene['image']:
-                st.image(scene['image'], width=180)
-            active_image = (scene['image'] or
-                            (scenes[index-1]['last_frame'] if continuity and index > 0
-                             else None) or
-                            (reference.getvalue() if reference else None))
-            if active_image:
-                st.download_button('🖼️ Télécharger l’image à transmettre au moteur',
-                                   active_image, file_name=f'image_scene_{index+1:02d}.png',
-                                   mime='image/png', key=f'active_image_{index}',
-                                   use_container_width=True)
-
-            names = list(SERVICES)
-            selected = st.selectbox('Moteur vidéo', names, index=names.index(scene['engine']),
-                                    key=f'engine_{index}')
-            scene['engine'] = selected
-            st.link_button('🌐 Ouvrir ' + selected, SERVICES[selected], use_container_width=True)
-            st.info('Mode manuel : copie le prompt, ouvre le moteur, génère la vidéo, puis importe le MP4/WEBM. Le moteur automatique LTX ne peut pas exploiter une image de raccord dans cette intégration.')
-            video_file = st.file_uploader('Importer la vidéo générée (MP4/WEBM)',
-                                          type=['mp4', 'webm'], key=f'video_{index}')
-            if video_file:
-                data = video_file.getvalue()
-                extension = Path(video_file.name).suffix.lower()
-                scene['video'] = (data, extension)
-                scene['last_frame'] = extract_last_frame(data, extension)
-            if scene['video']:
-                st.video(scene['video'][0])
-                if scene['last_frame']:
-                    st.image(scene['last_frame'], caption='Dernière image extraite', width=180)
-                elif not ffmpeg_available():
-                    st.warning('FFmpeg absent : extraction de la dernière image impossible.')
-
-    project = {'title': title, 'artist': artist, 'duration': duration,
-               'style': style, 'ratio': ratio, 'priority': 'Lore Motion',
-               'fallback': fallback, 'continuity': continuity,
-               'scenes': [{k: v for k, v in scene.items()
-                           if k not in ('image', 'video', 'last_frame')}
-                          for scene in scenes]}
-    st.download_button('📦 Télécharger le storyboard JSON',
-                       json.dumps(project, ensure_ascii=False, indent=2),
-                       file_name='karmaclip_storyboard.json', mime='application/json',
-                       use_container_width=True)
-    if st.button('🎞️ Assembler le clip final', type='primary', use_container_width=True):
-        try:
-            with st.spinner('Montage du clip en cours…'):
-                st.session_state.clip = assemble_clip(scenes, music, music_ext, ratio)
-            st.success('Clip final terminé !')
-        except Exception as error:
-            st.error(str(error))
-    if st.session_state.clip:
-        st.video(st.session_state.clip)
-        st.download_button('⬇️ Télécharger le clip MP4', st.session_state.clip,
-                           file_name='karmaclip_final.mp4', mime='video/mp4',
-                           use_container_width=True)
-else:
-    st.info('Commence par préparer les scènes à partir de ta chanson.')
-
-st.caption('Les services vidéo externes peuvent appliquer des quotas, connexions ou frais. Aucun paiement automatique.')
+                    zf.write
