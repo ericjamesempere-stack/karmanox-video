@@ -1,4 +1,3 @@
-
 import io
 import base64
 import requests
@@ -387,4 +386,139 @@ if st.session_state.scenes:
 
     st.markdown("### 3B. Sélection et génération")
     st.markdown("### Production de scènes sélectionnées")
-    st.caption("Lore Motion est prioritaire mais n'a pas d'API vérifiée ici. LTX peut être tenté directement : disponibilité non garan
+    st.caption("Lore Motion est prioritaire mais n'a pas d'API vérifiée ici. LTX peut être tenté directement : disponibilité non garantie.")
+    if "scene_selection" not in st.session_state:
+        st.session_state.scene_selection = []
+    if "select_all" not in st.session_state:
+        st.session_state.select_all = False
+    def update_all():
+        st.session_state.scene_selection = (list(range(len(st.session_state.scenes)))
+                                            if st.session_state.select_all else [])
+    def update_individual():
+        st.session_state.select_all = len(st.session_state.scene_selection) == len(st.session_state.scenes)
+    st.checkbox("☑️ Sélectionner toutes les scènes", key="select_all", on_change=update_all)
+    chosen = st.multiselect(
+        "Scènes sélectionnées (aucune par défaut)", list(range(len(scenes))),
+        format_func=lambda i: f"Scène {i+1:02d} ({scenes[i]['start']:.0f}–{scenes[i]['end']:.0f}s)",
+        key="scene_selection", on_change=update_individual)
+    if automatic:
+        mode = "LTX (tentative automatique)"
+        st.info("Mode automatique expérimental : LTX génère les scènes une par une. Lore Motion ne dispose pas ici d'un connecteur automatique autorisé et vérifié.")
+    else:
+        mode = "Lore Motion (manuel)"
+        st.info("Mode manuel : ouvre le moteur de chaque scène, copie son prompt et importe le MP4 obtenu. Tu peux aussi sélectionner plusieurs scènes pour télécharger tous leurs prompts.")
+    if chosen:
+        import zipfile
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for j in chosen:
+                archive.writestr(f"scene_{j+1:02d}.txt", scenes[j]["prompt"])
+                if st.session_state.visual_reference_description:
+                    archive.writestr("personnages_reference.txt", st.session_state.visual_reference_description)
+                image_data = scenes[j].get("image")
+                if not image_data and continuity and j > 0:
+                    image_data = scenes[j-1].get("last_frame")
+                if not image_data and reference:
+                    image_data = reference.getvalue()
+                if image_data:
+                    archive.writestr(f"scene_{j+1:02d}_reference.png", image_data)
+        st.download_button("Télécharger tous les prompts sélectionnés", buffer.getvalue(),
+                           "prompts_karmaclip.zip", "application/zip")
+    retries = st.slider('Tentatives maximum par scène (LTX)', 1, 3, 2) if automatic else 2
+    st.caption("Les sites tiers ne peuvent pas être préremplis automatiquement depuis Streamlit sans API compatible. Le ZIP contient désormais les prompts ET les images à fournir.")
+
+    if st.button("🎬 Lancer les scènes sélectionnées" if automatic else "📋 Préparer les scènes sélectionnées", disabled=not chosen, use_container_width=True):
+        if mode.startswith("Lore Motion"):
+            st.warning("Lore Motion ne peut pas être lancé automatiquement depuis cette application sans API ou navigateur autorisé. Les prompts sont prêts à copier.")
+            st.link_button("Ouvrir Lore Motion", "https://loremotion.com/")
+        else:
+            bar = st.progress(0)
+            for position, j in enumerate(chosen):
+                if scenes[j]["video"]:
+                    bar.progress((position + 1) / len(chosen))
+                    continue
+                error = None
+                for attempt in range(retries):
+                    try:
+                        with st.spinner(f"Scène {j+1} — tentative {attempt+1}/{retries} via LTX…"):
+                            data, extension = generate_ltx_scene(scenes[j]["prompt"])
+                            scenes[j]["video"] = (data, extension)
+                            scenes[j]["last_frame"] = extract_last_frame(data, extension)
+                            scenes[j]["engine"] = "LTX / Hugging Face"
+                            error = None
+                            break
+                    except Exception as exc:
+                        error = exc
+                if error is not None:
+                    st.error(f"Arrêt scène {j+1}. Scènes déjà générées conservées dans cette session. {error}")
+                    if fallback:
+                        st.info('Choisis un autre moteur dans la fiche de cette scène, puis importe sa vidéo pour reprendre.')
+                    break
+                bar.progress((position + 1) / len(chosen))
+            if all(scene['video'] for scene in scenes):
+                st.success('Toutes les scènes sont prêtes ! Tu peux assembler le clip ci-dessous.')
+            else:
+                st.info('Production interrompue ou partielle. Les vidéos terminées restent disponibles dans cette session.')
+
+    completed = [(i, scene) for i, scene in enumerate(scenes) if scene['video']]
+    st.progress(len(completed) / len(scenes), text=f"{len(completed)}/{len(scenes)} vidéos générées ou importées")
+    if completed:
+        import zipfile
+        backup = io.BytesIO()
+        with zipfile.ZipFile(backup, 'w', compression=zipfile.ZIP_STORED) as zf:
+            for i, scene in completed:
+                data, ext = scene['video']
+                zf.writestr(f'scene_{i+1:03d}{ext}', data)
+                if scene['last_frame']:
+                    zf.writestr(f'scene_{i+1:03d}_last.png', scene['last_frame'])
+        st.download_button('💾 Sauvegarder les scènes terminées (ZIP)', backup.getvalue(),
+                           'karmaclip_scenes.zip', 'application/zip', use_container_width=True)
+    st.markdown("### 4. Sauvegarde et montage")
+    st.caption("Sauvegarde les vidéos en ZIP avant de fermer l'onglet : Streamlit Cloud ne garantit pas la conservation de la session.")
+    restore = st.file_uploader("Restaurer des vidéos d'un ZIP de sauvegarde (facultatif)", type=["zip"], key="restore_zip")
+    if restore and st.button("📥 Restaurer les scènes du ZIP"):
+        import zipfile
+        restored = 0
+        try:
+            with zipfile.ZipFile(io.BytesIO(restore.getvalue())) as archive:
+                for filename in archive.namelist():
+                    match = re.fullmatch(r"scene_(\d+)\.(mp4|webm)", Path(filename).name)
+                    if not match:
+                        continue
+                    j = int(match.group(1)) - 1
+                    if 0 <= j < len(scenes):
+                        raw = archive.read(filename)
+                        scenes[j]["video"] = (raw, "." + match.group(2))
+                        scenes[j]["last_frame"] = extract_last_frame(raw, "." + match.group(2))
+                        restored += 1
+            st.success(f"{restored} scènes restaurées.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Restauration impossible : {exc}")
+
+    project = {'title': title, 'artist': artist, 'duration': duration,
+               'style': style, 'ratio': ratio, 'priority': 'Lore Motion',
+               'fallback': fallback, 'continuity': continuity,
+               'scenes': [{k: v for k, v in scene.items()
+                           if k not in ('image', 'video', 'last_frame')}
+                          for scene in scenes]}
+    st.download_button('📦 Télécharger le storyboard JSON',
+                       json.dumps(project, ensure_ascii=False, indent=2),
+                       file_name='karmaclip_storyboard.json', mime='application/json',
+                       use_container_width=True)
+    if st.button('🎞️ Assembler le clip final', type='primary', use_container_width=True):
+        try:
+            with st.spinner('Montage du clip en cours…'):
+                st.session_state.clip = assemble_clip(scenes, music, music_ext, ratio)
+            st.success('Clip final terminé !')
+        except Exception as error:
+            st.error(str(error))
+    if st.session_state.clip:
+        st.video(st.session_state.clip)
+        st.download_button('⬇️ Télécharger le clip MP4', st.session_state.clip,
+                           file_name='karmaclip_final.mp4', mime='video/mp4',
+                           use_container_width=True)
+else:
+    st.info('Commence par préparer les scènes à partir de ta chanson.')
+
+st.caption('Les services vidéo externes peuvent appliquer des quotas, connexions ou frais. Aucun paiement automatique.')
