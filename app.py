@@ -413,4 +413,297 @@ with st.container(border=True):
                 with st.spinner("Analyse de l'image en cours…"):
                     description = describe_image_free(reference.getvalue())
                 st.session_state.visual_reference_description = description
-                st.success("Description créée. Vérifie le
+                st.success("Description créée. Vérifie le nombre de personnages et les vêtements.")
+                st.rerun()
+            except ImportError:
+                st.error("Modèle gratuit non installé. Ajoute les dépendances du fichier requirements_V10.txt à requirements.txt.")
+            except Exception as exc:
+                st.warning(f"Analyse locale indisponible : {exc}. Tu peux toujours décrire l'image manuellement.")
+        if plus_click:
+            try:
+                st.session_state.visual_reference_description = describe_image(
+                    reference.getvalue(), reference.type or "image/jpeg"
+                )
+                st.rerun()
+            except Exception as exc:
+                st.warning(f"Analyse avancée indisponible : {exc}")
+    st.selectbox("🎭 Ambiance de réalisation", [
+        "Automatique selon la chanson", "Danse et humour", "Romantique",
+        "Mélancolique", "Énergie et dépassement", "Onirique et surprenant"
+    ], key="director_mood")
+    st.caption("Le réalisateur transforme les émotions de la chanson en actions à l'écran ; il ne recopie pas les paroles.")
+    if reference:
+        st.caption("L'image de départ est jointe aux exports. Pour une fidélité visuelle réelle, choisis un moteur image-vers-vidéo et fournis-lui cette image.")
+    if st.button('✨ Préparer toutes les scènes', type='primary', use_container_width=True):
+        if not lyrics.strip() and not idea.strip() and not reference:
+            st.warning('Ajoute des paroles, une idée ou une image.')
+        else:
+            st.session_state.scenes = create_scenes(lyrics, duration, style, ratio, idea or ('Animate the provided reference character in a cinematic scene' if reference else ''), scene_length)
+            moods = {
+                "Danse et humour": "dance", "Romantique": "romantic",
+                "Mélancolique": "melancholic", "Énergie et dépassement": "power",
+                "Onirique et surprenant": "dreamlike"
+            }
+            selected_mood = moods.get(st.session_state.director_mood,
+                                      scene_mood(lyrics + " " + idea, 0, len(st.session_state.scenes)))
+            st.session_state.current_mood = selected_mood
+            for generated_scene in st.session_state.scenes:
+                generated_scene["prompt"] = image_guided_prompt(
+                    generated_scene, style, st.session_state.visual_reference_description,
+                    mood=selected_mood, total_scenes=len(st.session_state.scenes),
+                    story_idea=idea
+                )
+            for k in list(st.session_state.keys()):
+                if re.fullmatch(r"prompt_\\d+", k):
+                    del st.session_state[k]
+            st.session_state.clip = None
+            st.session_state.scene_selection = []
+            st.session_state.select_all = False
+            st.success(f'{len(st.session_state.scenes)} scènes préparées !')
+    if st.session_state.scenes and st.button("🎬 Réalisation IA avancée (facultatif, clé API nécessaire)",
+                                             use_container_width=True):
+        try:
+            with st.spinner("Le réalisateur imagine des actions et une histoire visuelle…"):
+                prompts = creative_storyboard_with_ai(
+                    st.session_state.scenes, lyrics, st.session_state.visual_reference_description,
+                    idea, style, reference.getvalue() if reference else None,
+                    reference.type if reference else None
+                )
+                for j, prompt in enumerate(prompts):
+                    st.session_state.scenes[j]["prompt"] = prompt
+                    st.session_state[f"prompt_{j}"] = prompt
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Réalisateur IA indisponible : {exc}")
+
+
+with st.container(border=True):
+    st.subheader('2. Paramètres de production')
+    automatic = st.checkbox('🤖 Mode automatique', value=False, key='automatic_mode', help='Désactivé par défaut. LTX est le seul connecteur expérimental direct ; Lore Motion reste manuel.')
+    fallback = st.checkbox('Proposer un autre moteur en cas d’échec', value=True)
+    continuity = st.checkbox('Continuité entre les scènes (image finale → scène suivante)', value=True)
+    st.info('Vidéos IA uniquement. Lore Motion reste accessible en priorité manuelle. '
+            'La génération automatique expérimentale utilise LTX si son interface publique répond. '
+            'La continuité par image n’est pas prise en charge par cette interface LTX.')
+    with st.expander('🌐 Tous les moteurs disponibles'):
+        for name, url in SERVICES.items():
+            st.link_button('Ouvrir ' + name, url, use_container_width=True)
+
+if st.session_state.scenes:
+    scenes = st.session_state.scenes
+    st.subheader(f'3. Tes scènes ({len(scenes)})')
+    st.caption('Répartition approximative des paroles : la synchronisation mot à mot nécessite des paroles horodatées.')
+    st.info("Chaque prompt raconte une action visible. Les paroles orientent l'émotion, pas le texte du prompt. Tu peux remplacer chaque action par ton idée.")
+
+    st.markdown("### 3A. Storyboard et prompts — avant la génération")
+    st.caption("Modifie chaque prompt et chaque image avant de choisir les scènes à produire.")
+    for index, scene in enumerate(scenes):
+        with st.expander(f'Scène {index + 1:02d} · {scene["start"]:.0f}–{scene["end"]:.0f} s'
+                         + (' · ✅ vidéo prête' if scene['video'] else ''), expanded=(index == 0)):
+            st.caption('Paroles : ' + (scene['lyrics'] or '—'))
+            scene['scene_idea'] = st.text_area(
+                '💡 Mon idée pour cette scène (facultatif)',
+                value=scene.get('scene_idea', ''),
+                placeholder='Ex. Deux bananes se regardent timidement en dansant.',
+                height=75, key=f'scene_idea_{index}'
+            )
+            if st.button('✨ Créer un prompt court à partir de mon idée', key=f'build_prompt_{index}',
+                         use_container_width=True):
+                new_prompt = image_guided_prompt(scene, style, st.session_state.visual_reference_description,
+                                               scene['scene_idea'],
+                                               mood=st.session_state.get('current_mood', 'dreamlike'),
+                                               total_scenes=len(scenes), story_idea=idea)
+                scene['prompt'] = new_prompt
+                st.session_state[f'prompt_{index}'] = new_prompt
+                st.rerun()
+            scene['prompt'] = st.text_area('✏️ Prompt vidéo (modifiable)',
+                                           value=scene['prompt'], height=105,
+                                           key=f'prompt_{index}')
+            st.code(scene['prompt'], language=None)
+            st.caption('Appuie sur l’icône Copier du bloc ci-dessus, puis colle le prompt dans le moteur.')
+            st.download_button('📋 Télécharger le prompt', scene['prompt'],
+                               file_name=f'prompt_scene_{index + 1:02d}.txt',
+                               mime='text/plain', key=f'prompt_file_{index}',
+                               use_container_width=True)
+            if continuity and index > 0 and scenes[index - 1]['last_frame']:
+                frame = scenes[index - 1]['last_frame']
+                st.image(frame, caption='Dernière image de la scène précédente', width=230)
+                st.download_button('⬇️ Télécharger l’image de raccord', frame,
+                                   file_name=f'raccord_scene_{index + 1:02d}.png',
+                                   mime='image/png', key=f'raccord_{index}')
+            elif reference and (index == 0 or not continuity):
+                st.image(reference.getvalue(), caption='Image de référence', width=180)
+            image_file = st.file_uploader('Image de départ de cette scène (facultative)',
+                                          type=['png', 'jpg', 'jpeg', 'webp'], key=f'image_{index}')
+            if image_file:
+                scene['image'] = image_file.getvalue()
+            if scene['image']:
+                st.image(scene['image'], width=180)
+            active_image = (scene['image'] or
+                            (scenes[index-1]['last_frame'] if continuity and index > 0
+                             else None) or
+                            (reference.getvalue() if reference else None))
+            if active_image:
+                st.download_button('🖼️ Télécharger l’image à transmettre au moteur',
+                                   active_image, file_name=f'image_scene_{index+1:02d}.png',
+                                   mime='image/png', key=f'active_image_{index}',
+                                   use_container_width=True)
+
+            names = list(SERVICES)
+            selected = st.selectbox('Moteur vidéo', names, index=names.index(scene['engine']),
+                                    key=f'engine_{index}')
+            scene['engine'] = selected
+            st.link_button('🌐 Ouvrir ' + selected, SERVICES[selected], use_container_width=True)
+            st.info('Mode manuel : copie le prompt, ouvre le moteur, génère la vidéo, puis importe le MP4/WEBM. Le moteur automatique LTX ne peut pas exploiter une image de raccord dans cette intégration.')
+            video_file = st.file_uploader('Importer la vidéo générée (MP4/WEBM)',
+                                          type=['mp4', 'webm'], key=f'video_{index}')
+            if video_file and not scene['video']:
+                data = video_file.getvalue()
+                extension = Path(video_file.name).suffix.lower()
+                scene['video'] = (data, extension)
+                scene['last_frame'] = extract_last_frame(data, extension)
+            if scene['video']:
+                st.video(scene['video'][0])
+                if scene['last_frame']:
+                    st.image(scene['last_frame'], caption='Dernière image extraite', width=180)
+                elif not ffmpeg_available():
+                    st.warning('FFmpeg absent : extraction de la dernière image impossible.')
+
+    st.markdown("### 3B. Sélection et génération")
+    st.markdown("### Production de scènes sélectionnées")
+    st.caption("Lore Motion est prioritaire mais n'a pas d'API vérifiée ici. LTX peut être tenté directement : disponibilité non garantie.")
+    if "scene_selection" not in st.session_state:
+        st.session_state.scene_selection = []
+    if "select_all" not in st.session_state:
+        st.session_state.select_all = False
+    def update_all():
+        st.session_state.scene_selection = (list(range(len(st.session_state.scenes)))
+                                            if st.session_state.select_all else [])
+    def update_individual():
+        st.session_state.select_all = len(st.session_state.scene_selection) == len(st.session_state.scenes)
+    st.checkbox("☑️ Sélectionner toutes les scènes", key="select_all", on_change=update_all)
+    chosen = st.multiselect(
+        "Scènes sélectionnées (aucune par défaut)", list(range(len(scenes))),
+        format_func=lambda i: f"Scène {i+1:02d} ({scenes[i]['start']:.0f}–{scenes[i]['end']:.0f}s)",
+        key="scene_selection", on_change=update_individual)
+    if automatic:
+        mode = "LTX (tentative automatique)"
+        st.info("Mode automatique expérimental : LTX génère les scènes une par une. Lore Motion ne dispose pas ici d'un connecteur automatique autorisé et vérifié.")
+    else:
+        mode = "Lore Motion (manuel)"
+        st.info("Mode manuel : ouvre le moteur de chaque scène, copie son prompt et importe le MP4 obtenu. Tu peux aussi sélectionner plusieurs scènes pour télécharger tous leurs prompts.")
+    if chosen:
+        import zipfile
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for j in chosen:
+                archive.writestr(f"scene_{j+1:02d}.txt", scenes[j]["prompt"])
+                if st.session_state.visual_reference_description:
+                    archive.writestr("personnages_reference.txt", st.session_state.visual_reference_description)
+                image_data = scenes[j].get("image")
+                if not image_data and continuity and j > 0:
+                    image_data = scenes[j-1].get("last_frame")
+                if not image_data and reference:
+                    image_data = reference.getvalue()
+                if image_data:
+                    archive.writestr(f"scene_{j+1:02d}_reference.png", image_data)
+        st.download_button("Télécharger tous les prompts sélectionnés", buffer.getvalue(),
+                           "prompts_karmaclip.zip", "application/zip")
+    retries = st.slider('Tentatives maximum par scène (LTX)', 1, 3, 2) if automatic else 2
+    st.caption("Les sites tiers ne peuvent pas être préremplis automatiquement depuis Streamlit sans API compatible. Le ZIP contient désormais les prompts ET les images à fournir.")
+
+    if st.button("🎬 Lancer les scènes sélectionnées" if automatic else "📋 Préparer les scènes sélectionnées", disabled=not chosen, use_container_width=True):
+        if mode.startswith("Lore Motion"):
+            st.warning("Lore Motion ne peut pas être lancé automatiquement depuis cette application sans API ou navigateur autorisé. Les prompts sont prêts à copier.")
+            st.link_button("Ouvrir Lore Motion", "https://loremotion.com/")
+        else:
+            bar = st.progress(0)
+            for position, j in enumerate(chosen):
+                if scenes[j]["video"]:
+                    bar.progress((position + 1) / len(chosen))
+                    continue
+                error = None
+                for attempt in range(retries):
+                    try:
+                        with st.spinner(f"Scène {j+1} — tentative {attempt+1}/{retries} via LTX…"):
+                            data, extension = generate_ltx_scene(scenes[j]["prompt"])
+                            scenes[j]["video"] = (data, extension)
+                            scenes[j]["last_frame"] = extract_last_frame(data, extension)
+                            scenes[j]["engine"] = "LTX / Hugging Face"
+                            error = None
+                            break
+                    except Exception as exc:
+                        error = exc
+                if error is not None:
+                    st.error(f"Arrêt scène {j+1}. Scènes déjà générées conservées dans cette session. {error}")
+                    if fallback:
+                        st.info('Choisis un autre moteur dans la fiche de cette scène, puis importe sa vidéo pour reprendre.')
+                    break
+                bar.progress((position + 1) / len(chosen))
+            if all(scene['video'] for scene in scenes):
+                st.success('Toutes les scènes sont prêtes ! Tu peux assembler le clip ci-dessous.')
+            else:
+                st.info('Production interrompue ou partielle. Les vidéos terminées restent disponibles dans cette session.')
+
+    completed = [(i, scene) for i, scene in enumerate(scenes) if scene['video']]
+    st.progress(len(completed) / len(scenes), text=f"{len(completed)}/{len(scenes)} vidéos générées ou importées")
+    if completed:
+        import zipfile
+        backup = io.BytesIO()
+        with zipfile.ZipFile(backup, 'w', compression=zipfile.ZIP_STORED) as zf:
+            for i, scene in completed:
+                data, ext = scene['video']
+                zf.writestr(f'scene_{i+1:03d}{ext}', data)
+                if scene['last_frame']:
+                    zf.writestr(f'scene_{i+1:03d}_last.png', scene['last_frame'])
+        st.download_button('💾 Sauvegarder les scènes terminées (ZIP)', backup.getvalue(),
+                           'karmaclip_scenes.zip', 'application/zip', use_container_width=True)
+    st.markdown("### 4. Sauvegarde et montage")
+    st.caption("Sauvegarde les vidéos en ZIP avant de fermer l'onglet : Streamlit Cloud ne garantit pas la conservation de la session.")
+    restore = st.file_uploader("Restaurer des vidéos d'un ZIP de sauvegarde (facultatif)", type=["zip"], key="restore_zip")
+    if restore and st.button("📥 Restaurer les scènes du ZIP"):
+        import zipfile
+        restored = 0
+        try:
+            with zipfile.ZipFile(io.BytesIO(restore.getvalue())) as archive:
+                for filename in archive.namelist():
+                    match = re.fullmatch(r"scene_(\d+)\.(mp4|webm)", Path(filename).name)
+                    if not match:
+                        continue
+                    j = int(match.group(1)) - 1
+                    if 0 <= j < len(scenes):
+                        raw = archive.read(filename)
+                        scenes[j]["video"] = (raw, "." + match.group(2))
+                        scenes[j]["last_frame"] = extract_last_frame(raw, "." + match.group(2))
+                        restored += 1
+            st.success(f"{restored} scènes restaurées.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Restauration impossible : {exc}")
+
+    project = {'title': title, 'artist': artist, 'duration': duration,
+               'style': style, 'ratio': ratio, 'priority': 'Lore Motion',
+               'fallback': fallback, 'continuity': continuity,
+               'scenes': [{k: v for k, v in scene.items()
+                           if k not in ('image', 'video', 'last_frame')}
+                          for scene in scenes]}
+    st.download_button('📦 Télécharger le storyboard JSON',
+                       json.dumps(project, ensure_ascii=False, indent=2),
+                       file_name='karmaclip_storyboard.json', mime='application/json',
+                       use_container_width=True)
+    if st.button('🎞️ Assembler le clip final', type='primary', use_container_width=True):
+        try:
+            with st.spinner('Montage du clip en cours…'):
+                st.session_state.clip = assemble_clip(scenes, music, music_ext, ratio)
+            st.success('Clip final terminé !')
+        except Exception as error:
+            st.error(str(error))
+    if st.session_state.clip:
+        st.video(st.session_state.clip)
+        st.download_button('⬇️ Télécharger le clip MP4', st.session_state.clip,
+                           file_name='karmaclip_final.mp4', mime='video/mp4',
+                           use_container_width=True)
+else:
+    st.info('Commence par préparer les scènes à partir de ta chanson.')
+
+st.caption('Les services vidéo externes peuvent appliquer des quotas, connexions ou frais. Aucun paiement automatique.')
