@@ -11,11 +11,13 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V10', page_icon='🎬', layout='wide')
+st.set_page_config(page_title='KarmaClip AI V10.1', page_icon='🎬', layout='wide')
 if "visual_reference_description" not in st.session_state:
     st.session_state.visual_reference_description = ""
+if "visual_reference_input" not in st.session_state:
+    st.session_state.visual_reference_input = st.session_state.visual_reference_description
 
-st.title('🎬 KarmaClip AI V10')
+st.title('🎬 KarmaClip AI V10.1')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
@@ -396,11 +398,15 @@ with st.container(border=True):
                                  type=['png', 'jpg', 'jpeg', 'webp'])
     if reference:
         st.image(reference.getvalue(), width=200)
+    # Apply AI output before the text widget is instantiated (Streamlit rule).
+    if "visual_reference_pending" in st.session_state:
+        st.session_state.visual_reference_input = st.session_state.pop("visual_reference_pending")
     st.text_area(
         "🖼️ Description des personnages de l'image (commune à toutes les scènes)",
         placeholder="Ex. Two anthropomorphic bananas: one in a black suit, one in a red evening dress. Both dancing at a party.",
-        height=95, key="visual_reference_description"
+        height=95, key="visual_reference_input"
     )
+    st.session_state.visual_reference_description = st.session_state.visual_reference_input
     if reference:
         st.caption("Analyse gratuite : modèle BLIP local, sans clé API. Le premier lancement télécharge le modèle et peut être lent ou dépasser la mémoire de Streamlit Cloud.")
         col_free, col_plus = st.columns(2)
@@ -412,7 +418,7 @@ with st.container(border=True):
             try:
                 with st.spinner("Analyse de l'image en cours…"):
                     description = describe_image_free(reference.getvalue())
-                st.session_state.visual_reference_description = description
+                st.session_state.visual_reference_pending = description
                 st.success("Description créée. Vérifie le nombre de personnages et les vêtements.")
                 st.rerun()
             except ImportError:
@@ -421,7 +427,7 @@ with st.container(border=True):
                 st.warning(f"Analyse locale indisponible : {exc}. Tu peux toujours décrire l'image manuellement.")
         if plus_click:
             try:
-                st.session_state.visual_reference_description = describe_image(
+                st.session_state.visual_reference_pending = describe_image(
                     reference.getvalue(), reference.type or "image/jpeg"
                 )
                 st.rerun()
