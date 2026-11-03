@@ -9,8 +9,8 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V2', page_icon='🎬', layout='wide')
-st.title('🎬 KarmaClip AI V2')
+st.set_page_config(page_title='KarmaClip AI V4', page_icon='🎬', layout='wide')
+st.title('🎬 KarmaClip AI V4')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
@@ -210,22 +210,23 @@ with st.container(border=True):
     if reference:
         st.image(reference.getvalue(), width=200)
     if st.button('✨ Préparer toutes les scènes', type='primary', use_container_width=True):
-        if not lyrics.strip() and not idea.strip():
-            st.warning('Ajoute des paroles ou une idée de clip.')
+        if not lyrics.strip() and not idea.strip() and not reference:
+            st.warning('Ajoute des paroles, une idée ou une image.')
         else:
-            st.session_state.scenes = create_scenes(lyrics, duration, style, ratio, idea)
+            st.session_state.scenes = create_scenes(lyrics, duration, style, ratio, idea or ('Animate the provided reference character in a cinematic scene' if reference else ''))
             st.session_state.clip = None
+            st.session_state.scene_selection = []
+            st.session_state.select_all = False
             st.success(f'{len(st.session_state.scenes)} scènes préparées !')
 
 with st.container(border=True):
     st.subheader('2. Paramètres de production')
-    automatic = st.checkbox('Production automatique (si connecteurs disponibles)', value=False)
-    fallback = st.checkbox('Basculement automatique entre moteurs compatibles', value=True)
-    continuity = st.checkbox('Continuité entre les scènes', value=True)
-    st.caption('Lore Motion est prioritaire. Aucun connecteur automatique vérifié n’est installé. '
-               'Les moteurs s’ouvrent en mode manuel. La case automatique est décochée au démarrage.')
-    if automatic:
-        st.warning('Aucun connecteur vidéo automatique actif : la production externe reste manuelle.')
+    automatic = st.checkbox('🤖 Mode automatique', value=False, key='automatic_mode', help='Désactivé par défaut. LTX est le seul connecteur expérimental direct ; Lore Motion reste manuel.')
+    fallback = st.checkbox('Proposer un autre moteur en cas d’échec', value=True)
+    continuity = st.checkbox('Continuité entre les scènes (image finale → scène suivante)', value=True)
+    st.info('Vidéos IA uniquement. Lore Motion reste accessible en priorité manuelle. '
+            'La génération automatique expérimentale utilise LTX si son interface publique répond. '
+            'La continuité par image n’est pas prise en charge par cette interface LTX.')
     with st.expander('🌐 Tous les moteurs disponibles'):
         for name, url in SERVICES.items():
             st.link_button('Ouvrir ' + name, url, use_container_width=True)
@@ -236,10 +237,26 @@ if st.session_state.scenes:
     st.caption('Répartition approximative des paroles : la synchronisation mot à mot nécessite des paroles horodatées.')
     st.markdown("### Production de scènes sélectionnées")
     st.caption("Lore Motion est prioritaire mais n'a pas d'API vérifiée ici. LTX peut être tenté directement : disponibilité non garantie.")
-    missing = [i for i, scene in enumerate(scenes) if not scene["video"]]
-    chosen = st.multiselect("Scènes à traiter", list(range(len(scenes))), default=missing,
-                            format_func=lambda i: f"Scène {i+1:02d} ({scenes[i]['start']:.0f}–{scenes[i]['end']:.0f}s)")
-    mode = st.radio("Mode de production", ["Lore Motion (manuel)", "LTX (tentative automatique)"])
+    if "scene_selection" not in st.session_state:
+        st.session_state.scene_selection = []
+    if "select_all" not in st.session_state:
+        st.session_state.select_all = False
+    def update_all():
+        st.session_state.scene_selection = (list(range(len(st.session_state.scenes)))
+                                            if st.session_state.select_all else [])
+    def update_individual():
+        st.session_state.select_all = len(st.session_state.scene_selection) == len(st.session_state.scenes)
+    st.checkbox("☑️ Sélectionner toutes les scènes", key="select_all", on_change=update_all)
+    chosen = st.multiselect(
+        "Scènes sélectionnées (aucune par défaut)", list(range(len(scenes))),
+        format_func=lambda i: f"Scène {i+1:02d} ({scenes[i]['start']:.0f}–{scenes[i]['end']:.0f}s)",
+        key="scene_selection", on_change=update_individual)
+    if automatic:
+        mode = "LTX (tentative automatique)"
+        st.info("Mode automatique expérimental : LTX génère les scènes une par une. Lore Motion ne dispose pas ici d'un connecteur automatique autorisé et vérifié.")
+    else:
+        mode = "Lore Motion (manuel)"
+        st.info("Mode manuel : ouvre le moteur de chaque scène, copie son prompt et importe le MP4 obtenu. Tu peux aussi sélectionner plusieurs scènes pour télécharger tous leurs prompts.")
     if chosen:
         import zipfile
         buffer = io.BytesIO()
@@ -248,7 +265,8 @@ if st.session_state.scenes:
                 archive.writestr(f"scene_{j+1:02d}.txt", scenes[j]["prompt"])
         st.download_button("Télécharger tous les prompts sélectionnés", buffer.getvalue(),
                            "prompts_karmaclip.zip", "application/zip")
-    if st.button("Générer les scènes sélectionnées", disabled=not chosen, use_container_width=True):
+    retries = st.slider('Tentatives maximum par scène (LTX)', 1, 3, 2)
+    if st.button("🎬 Lancer les scènes sélectionnées" if automatic else "📋 Préparer les scènes sélectionnées", disabled=not chosen, use_container_width=True):
         if mode.startswith("Lore Motion"):
             st.warning("Lore Motion ne peut pas être lancé automatiquement depuis cette application sans API ou navigateur autorisé. Les prompts sont prêts à copier.")
             st.link_button("Ouvrir Lore Motion", "https://loremotion.com/")
@@ -258,18 +276,42 @@ if st.session_state.scenes:
                 if scenes[j]["video"]:
                     bar.progress((position + 1) / len(chosen))
                     continue
-                try:
-                    with st.spinner(f"Génération de la scène {j+1} via LTX…"):
-                        data, extension = generate_ltx_scene(scenes[j]["prompt"])
-                        scenes[j]["video"] = (data, extension)
-                        scenes[j]["last_frame"] = extract_last_frame(data, extension)
-                        scenes[j]["engine"] = "LTX / Hugging Face"
-                except Exception as exc:
-                    st.error(f"Arrêt sur la scène {j+1}. Les scènes précédentes restent enregistrées dans cette session. {exc}")
+                error = None
+                for attempt in range(retries):
+                    try:
+                        with st.spinner(f"Scène {j+1} — tentative {attempt+1}/{retries} via LTX…"):
+                            data, extension = generate_ltx_scene(scenes[j]["prompt"])
+                            scenes[j]["video"] = (data, extension)
+                            scenes[j]["last_frame"] = extract_last_frame(data, extension)
+                            scenes[j]["engine"] = "LTX / Hugging Face"
+                            error = None
+                            break
+                    except Exception as exc:
+                        error = exc
+                if error is not None:
+                    st.error(f"Arrêt scène {j+1}. Scènes déjà générées conservées dans cette session. {error}")
+                    if fallback:
+                        st.info('Choisis un autre moteur dans la fiche de cette scène, puis importe sa vidéo pour reprendre.')
                     break
                 bar.progress((position + 1) / len(chosen))
-            st.success("Tentative terminée. Vérifie les vidéos ci-dessous.")
+            if all(scene['video'] for scene in scenes):
+                st.success('Toutes les scènes sont prêtes ! Tu peux assembler le clip ci-dessous.')
+            else:
+                st.info('Production interrompue ou partielle. Les vidéos terminées restent disponibles dans cette session.')
 
+    completed = [(i, scene) for i, scene in enumerate(scenes) if scene['video']]
+    st.progress(len(completed) / len(scenes), text=f"{len(completed)}/{len(scenes)} vidéos générées ou importées")
+    if completed:
+        import zipfile
+        backup = io.BytesIO()
+        with zipfile.ZipFile(backup, 'w', compression=zipfile.ZIP_STORED) as zf:
+            for i, scene in completed:
+                data, ext = scene['video']
+                zf.writestr(f'scene_{i+1:03d}{ext}', data)
+                if scene['last_frame']:
+                    zf.writestr(f'scene_{i+1:03d}_last.png', scene['last_frame'])
+        st.download_button('💾 Sauvegarder les scènes terminées (ZIP)', backup.getvalue(),
+                           'karmaclip_scenes.zip', 'application/zip', use_container_width=True)
     for index, scene in enumerate(scenes):
         with st.expander(f'Scène {index + 1:02d} · {scene["start"]:.0f}–{scene["end"]:.0f} s'
                          + (' · ✅ vidéo prête' if scene['video'] else ''), expanded=(index == 0)):
@@ -301,7 +343,7 @@ if st.session_state.scenes:
                                     key=f'engine_{index}')
             scene['engine'] = selected
             st.link_button('🌐 Ouvrir ' + selected, SERVICES[selected], use_container_width=True)
-            st.info('Copie le prompt, ouvre le moteur, génère la vidéo, puis importe le MP4/WEBM ci-dessous.')
+            st.info('Mode manuel : copie le prompt, ouvre le moteur, génère la vidéo, puis importe le MP4/WEBM. Le moteur automatique LTX ne peut pas exploiter une image de raccord dans cette intégration.')
             video_file = st.file_uploader('Importer la vidéo générée (MP4/WEBM)',
                                           type=['mp4', 'webm'], key=f'video_{index}')
             if video_file:
