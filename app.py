@@ -11,13 +11,13 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V11', page_icon='🎬', layout='wide')
+st.set_page_config(page_title='KarmaClip AI V13', page_icon='🎬', layout='wide')
 if "visual_reference_description" not in st.session_state:
     st.session_state.visual_reference_description = ""
 if "visual_reference_input" not in st.session_state:
     st.session_state.visual_reference_input = st.session_state.visual_reference_description
 
-st.title('🎬 KarmaClip AI V11')
+st.title('🎬 KarmaClip AI V13')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
@@ -288,6 +288,69 @@ def image_guided_prompt(scene, style, reference_description, custom_idea='', moo
 
 
 
+def chained_prompt(scene, previous, style, identity, mood, total, idea, story_mode):
+    """Build next shot from the preceding shot's stated final position."""
+    base = image_guided_prompt(scene, style, identity, scene.get('scene_idea', ''),
+                               mood, total, idea, story_mode)
+    if previous is None:
+        return base
+    ending = previous.get('actual_end', '').strip() or previous.get('planned_end', '').strip()
+    if not ending:
+        _, _, ending = story_step(previous['index'], total, mood, story_mode, previous.get('lyrics', ''))
+    # A clear continuity instruction for generators; cannot infer true pose from video without video analysis.
+    prefix = (f"DIRECT CONTINUATION OF SHOT {previous['index']+1}. "
+              f"Starting state: {ending}. Maintain positions, characters, costumes and surroundings. ")
+    return prefix + base
+
+
+# Creative options share one immutable starting position, inherited from the previous shot.
+AMBIANCE_OPTIONS = {
+    "😊 Joyeuse": ("playful happiness", ["They exchange a delighted smile and perform a small synchronized bounce", "One makes a cheerful side-step and the other mirrors it with a laugh"]),
+    "😢 Triste": ("quiet sadness", ["They slow down, lower their heads and share a tender glance", "One pauses with drooping shoulders; the other gently moves closer"]),
+    "📚 Studieuse": ("focused concentration", ["They lean forward together to examine a small detail", "One gestures thoughtfully while the other watches with curiosity"]),
+    "🏃 Sportive": ("athletic energy", ["They perform a quick coordinated footwork drill", "One challenges the other to a playful, fast-paced movement"]),
+    "🎉 Festive": ("celebratory party energy", ["They burst into a lively synchronized dance step", "One spins joyfully as the other claps to the beat"]),
+    "💕 Romantique": ("tender affection", ["They share a lingering glance and take one gentle step closer", "One offers a hand and the other answers with a soft smile"]),
+    "😂 Comique": ("physical comedy", ["One makes an exaggerated dance move and nearly loses balance; the other reacts", "They try to imitate each other and end in a funny synchronized pose"]),
+    "😌 Apaisée": ("calm serenity", ["They sway slowly together, breathing in rhythm", "They pause for a peaceful glance, then make a soft, measured turn"]),
+    "😨 Mystérieuse": ("curious suspense", ["They turn toward an unexpected sound, then cautiously move together", "One notices something off-screen; the other follows their gaze"]),
+    "🔥 Énergique": ("intense momentum", ["They launch into sharp, synchronized steps with strong accents", "One leads a rapid turn and the other follows with confident footwork"]),
+    "🌙 Mélancolique": ("wistful nostalgia", ["They briefly look away, then find each other's eyes again", "One traces a slow movement as the other watches in silence"]),
+    "🌟 Inspirante": ("hopeful determination", ["They straighten their posture and step forward together", "One encourages the other with a gesture and they move in unison"]),
+}
+
+
+def two_ambiance_prompts(scene, previous, identity, style, mood_label, total):
+    """Two distinct continuations from the SAME prior ending, no external API."""
+    tone, actions = AMBIANCE_OPTIONS[mood_label]
+    prior = (previous.get("actual_end") or previous.get("planned_end") or
+             "the final positions from the previous scene") if previous else (
+             "the initial positions in the supplied reference image")
+    subjects = (f"Same original subjects: {identity}. " if identity.strip() else
+                "Exactly the same subjects as the reference image. ")
+    prefix = (f"{subjects}Continue directly from this starting position: {prior}. "
+              "Keep the same number of characters, faces, clothing, surroundings and spatial positions. ")
+    prompts = []
+    for number, action in enumerate(actions):
+        camera = ("steady medium shot" if number == 0 else "gentle tracking shot")
+        prompts.append(prefix + f"Mood: {tone}. Action: {action}. "
+                       f"Camera: {camera}. {style}. One continuous shot, natural movement, "
+                       "no new characters, no subtitles.")
+    return prompts
+
+
+def refresh_following_prompts(scenes, start, style, identity, mood, idea, story_mode):
+    """Update downstream drafts, leaving manually edited prompts untouched."""
+    for j in range(max(1, start), len(scenes)):
+        scene = scenes[j]
+        if scene.get('prompt_locked'):
+            continue
+        updated = chained_prompt(scene, scenes[j-1], style, identity, mood, len(scenes), idea, story_mode)
+        scene['prompt'] = updated
+        # Widget key must be updated before the widget is instantiated on a fresh rerun.
+        st.session_state[f'prompt_{j}'] = updated
+
+
 def create_scenes(lyrics, duration, style, ratio, idea, scene_length=5):
     lines = [line.strip() for line in lyrics.splitlines()
              if line.strip() and not re.match(r'^\\[.*\\]$', line.strip())]
@@ -301,7 +364,8 @@ def create_scenes(lyrics, duration, style, ratio, idea, scene_length=5):
         excerpt = ' / '.join(lines[first:last]) if lines else ""
         result.append({'index': index, 'start': start, 'end': end, 'lyrics': excerpt,
                        'prompt': '', 'scene_idea': '', 'image': None, 'video': None,
-                       'last_frame': None, 'engine': next(iter(SERVICES))})
+                       'last_frame': None, 'actual_end': '', 'planned_end': '',
+                       'prompt_locked': False, 'engine': next(iter(SERVICES))})
     return result
 
 
@@ -549,6 +613,14 @@ with st.container(border=True):
                     mood=selected_mood, total_scenes=len(st.session_state.scenes),
                     story_idea=idea, story_mode=timeline_mode
                 )
+            for j, item in enumerate(st.session_state.scenes):
+                item['planned_end'] = story_step(j, len(st.session_state.scenes),
+                    selected_mood, timeline_mode, item.get('lyrics', ''))[2]
+            for j in range(1, len(st.session_state.scenes)):
+                item = st.session_state.scenes[j]
+                item['prompt'] = chained_prompt(item, st.session_state.scenes[j-1], style,
+                    st.session_state.visual_reference_description, selected_mood,
+                    len(st.session_state.scenes), idea, timeline_mode)
             for k in list(st.session_state.keys()):
                 if re.fullmatch(r"prompt_\\d+", k):
                     del st.session_state[k]
@@ -591,6 +663,18 @@ if st.session_state.scenes:
     st.caption('Répartition approximative des paroles : la synchronisation mot à mot nécessite des paroles horodatées.')
     st.info("Chaque prompt raconte une action visible. Les paroles orientent l'émotion, pas le texte du prompt. Tu peux remplacer chaque action par ton idée.")
 
+    st.info("🔗 Enchaînement actif : chaque scène reprend la position finale annoncée par la précédente. Après une vidéo, indique sa position finale réelle : les prompts suivants se mettent à jour automatiquement.")
+    def mark_manual_prompt(i):
+        scenes[i]['prompt_locked'] = True
+        scenes[i]['prompt'] = st.session_state[f'prompt_{i}']
+
+    def update_actual_end(i):
+        scenes[i]['actual_end'] = st.session_state[f'actual_end_{i}']
+        refresh_following_prompts(scenes, i+1, style,
+            st.session_state.visual_reference_description,
+            st.session_state.get('current_mood', 'dreamlike'), idea,
+            st.session_state.get('timeline_mode', 'continuous'))
+
     st.markdown("### 3A. Storyboard et prompts — avant la génération")
     st.caption("Modifie chaque prompt et chaque image avant de choisir les scènes à produire.")
     for index, scene in enumerate(scenes):
@@ -610,12 +694,53 @@ if st.session_state.scenes:
                                                mood=st.session_state.get('current_mood', 'dreamlike'),
                                                total_scenes=len(scenes), story_idea=idea,
                                                story_mode=st.session_state.get('timeline_mode', 'continuous'))
+                scene['prompt_locked'] = False
                 scene['prompt'] = new_prompt
                 st.session_state[f'prompt_{index}'] = new_prompt
                 st.rerun()
+            st.markdown("**🎭 Deux propositions pour la scène suivante**")
+            mood_choice = st.selectbox(
+                "Choisis l'ambiance", list(AMBIANCE_OPTIONS),
+                index=4, key=f"ambiance_choice_{index}",
+                help="Les deux variantes repartent de la fin de la scène précédente."
+            )
+            previous_scene = scenes[index-1] if index else None
+            variants = two_ambiance_prompts(
+                scene, previous_scene, st.session_state.visual_reference_description,
+                style, mood_choice, len(scenes)
+            )
+            for variant_index, variant in enumerate(variants):
+                st.code(variant, language=None)
+                if st.button(f"Utiliser la proposition {variant_index+1}",
+                             key=f"choose_variant_{index}_{variant_index}",
+                             use_container_width=True):
+                    scene["prompt"] = variant
+                    scene["prompt_locked"] = True
+                    st.session_state[f"prompt_{index}"] = variant
+                    refresh_following_prompts(
+                        scenes, index+1, style,
+                        st.session_state.visual_reference_description,
+                        st.session_state.get("current_mood", "dreamlike"), idea,
+                        st.session_state.get("timeline_mode", "continuous")
+                    )
+                    st.rerun()
             scene['prompt'] = st.text_area('✏️ Prompt vidéo (modifiable)',
                                            value=scene['prompt'], height=105,
-                                           key=f'prompt_{index}')
+                                           key=f'prompt_{index}',
+                                           on_change=mark_manual_prompt, args=(index,))
+            if scene.get('prompt_locked') and st.button('🔄 Reprendre la suite automatique', key=f'unlock_{index}'):
+                scene['prompt_locked'] = False
+                refresh_following_prompts(scenes, index, style,
+                    st.session_state.visual_reference_description,
+                    st.session_state.get('current_mood', 'dreamlike'), idea,
+                    st.session_state.get('timeline_mode', 'continuous'))
+                st.rerun()
+            st.text_input('🎯 Position / mouvement final réel de cette scène (facultatif)',
+                value=scene.get('actual_end', ''), key=f'actual_end_{index}',
+                placeholder='Ex. Les deux bananes se tiennent par la main, face à face.',
+                on_change=update_actual_end, args=(index,))
+            if index > 0:
+                st.caption('Départ de cette scène : ' + (scenes[index-1].get('actual_end') or scenes[index-1].get('planned_end') or 'suite de la scène précédente'))
             st.code(scene['prompt'], language=None)
             st.caption('Appuie sur l’icône Copier du bloc ci-dessus, puis colle le prompt dans le moteur.')
             st.download_button('📋 Télécharger le prompt', scene['prompt'],
@@ -660,6 +785,7 @@ if st.session_state.scenes:
                 scene['video'] = (data, extension)
                 scene['last_frame'] = extract_last_frame(data, extension)
             if scene['video']:
+                st.caption('Vidéo prête : indique ci-dessus sa position finale réelle si elle diffère du scénario prévu. Les scènes suivantes se recalculent dès validation.')
                 st.video(scene['video'][0])
                 if scene['last_frame']:
                     st.image(scene['last_frame'], caption='Dernière image extraite', width=180)
