@@ -150,3 +150,11 @@ st.divider()
 with st.expander('🎨 Atelier animation 2D (nouveau)', expanded=False):
     from studio_2d import run
     run()
+st.divider()
+
+with st.expander(
+    "🎬 Wan 2.2 — Animation automatique",
+    expanded=False
+):
+    from wan_nifty import run as run_wan
+    run_wan()
