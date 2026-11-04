@@ -11,14 +11,14 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V17 · Réalisateur de storyboard', page_icon='🎬', layout='wide')
+st.set_page_config(page_title='KarmaClip AI V14.1', page_icon='🎬', layout='wide')
 if "visual_reference_description" not in st.session_state:
     st.session_state.visual_reference_description = ""
 if "visual_reference_input" not in st.session_state:
     st.session_state.visual_reference_input = st.session_state.visual_reference_description
 
-st.title('🎬 KarmaClip AI V17 · Réalisateur de storyboard')
-st.caption('WAV/MP3 + image + style → storyboard complet → prompts à copier dans LoreMotion')
+st.title('🎬 KarmaClip AI V14.1')
+st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
     'Lore Motion (prioritaire)': 'https://loremotion.com/',
@@ -31,91 +31,7 @@ SERVICES = {
     'Vidu': 'https://www.vidu.com/',
     'Veo': 'https://labs.google/fx/tools/flow',
 }
-STYLES = [
-    'Danse chorégraphiée', 'Fête et festival', 'Cinéma hollywoodien',
-    'Thriller et suspense', 'Comédie et burlesque', 'Romance et émotion',
-    'Science-fiction futuriste', 'Fantastique et magie', 'Aventure et voyage',
-    'Action et cascades', 'Horreur atmosphérique', 'Documentaire réaliste',
-    'Animation 3D', 'Manga et anime', 'Clip musical expérimental',
-    'Vintage années 80', 'Minimalisme artistique', 'Western moderne',
-    'Conte poétique', 'Sport et dépassement'
-]
-
-STYLE_DIRECTION = {
- 'Danse chorégraphiée':'precise expressive choreography, evolving body movements, musical accents',
- 'Fête et festival':'joyful celebration, crowds, confetti, lively social interactions',
- 'Cinéma hollywoodien':'big-budget feature film, motivated camera moves, cinematic staging',
- 'Thriller et suspense':'tense suspense, dramatic revelations, restrained camera motion',
- 'Comédie et burlesque':'physical comedy, playful timing, surprising reactions',
- 'Romance et émotion':'intimate performances, emotional expressions, tender cinematic lighting',
- 'Science-fiction futuriste':'futuristic environments, believable technology, immersive worldbuilding',
- 'Fantastique et magie':'magical realism, wondrous transformations, elaborate fantasy settings',
- 'Aventure et voyage':'exploration, sweeping landscapes, escalating discoveries',
- 'Action et cascades':'dynamic cinematic action, physical momentum, legible choreography',
- 'Horreur atmosphérique':'unsettling atmosphere, suspenseful framing, eerie environments',
- 'Documentaire réaliste':'observational handheld camera, authentic locations, natural motion',
- 'Animation 3D':'high-quality stylized 3D animation, expressive character acting',
- 'Manga et anime':'anime visual language, expressive action poses, cinematic composition',
- 'Clip musical expérimental':'abstract music-video editing, inventive visual metaphors',
- 'Vintage années 80':'analog film texture, period styling, expressive retro cinematography',
- 'Minimalisme artistique':'clean composition, controlled movement, strong visual symbolism',
- 'Western moderne':'wide dusty landscapes, western framing, atmospheric tension',
- 'Conte poétique':'lyrical imagery, visual storytelling, delicate expressive motion',
- 'Sport et dépassement':'athletic movement, effort, training, energetic camera tracking',
-}
-
-SEQUENCE_TABLEAUX = [
- ('Opening tableau','The subject enters a distinctive location and makes a clear first gesture'),
- ('Rhythmic contrast','A new action unfolds in a contrasting setting, with fresh choreography'),
- ('Unexpected encounter','A surprising new interaction changes the visual energy'),
- ('Movement showcase','The subject performs a bold physical movement with an unusual camera angle'),
- ('Atmospheric pause','The subject slows down in a striking, intimate composition'),
- ('Playful variation','An inventive and surprising action changes the rhythm'),
- ('Dynamic escalation','A faster and more energetic action creates a new visual peak'),
- ('Visual transformation','The environment changes dramatically around the central subject'),
- ('Close-up emotion','A detailed gesture or expression becomes the center of the shot'),
- ('Grand finale tableau','A spectacular visual payoff completes this independent sequence'),
-]
-
-def storyboard_prompt(scene, total, mode, style, identity, idea, mood, lyrics_sync):
-    i = scene['index']
-    progress = i / max(total-1, 1)
-    phase = min(4, int(progress * 5))
-    phase_names = ['SETUP / introduction', 'DEVELOPMENT / discovery',
-                   'COMPLICATION / escalation', 'CLIMAX / decisive change',
-                   'RESOLUTION / meaningful conclusion']
-    visual = STYLE_DIRECTION.get(style, style)
-    subject = ('Reference-image identity: ' + identity.strip() + '. ' if identity.strip()
-               else 'Keep the same identifiable main subject from the reference image. ')
-    idea_context = ('Central concept: ' + idea.strip()[:350] + '. ' if idea.strip() else '')
-    if mode == '🎞️ Court-métrage — histoire continue':
-        start, action, end = story_step(i, total, mood, 'lyrics' if lyrics_sync else 'continuous', scene.get('lyrics',''))
-        phase_action = [
-          'Establish the protagonist, location and objective with a meaningful first action',
-          'Advance the objective through a new concrete discovery or encounter',
-          'Introduce a new obstacle and a clear reaction that changes the situation',
-          'Show a decisive action and its visible consequences',
-          'Resolve the conflict with a satisfying changed final state'
-        ][phase]
-        return (f'{subject}{idea_context}SCENE {i+1}/{total}; {phase_names[phase]}. '
-                f'Narrative function: {phase_action}. Begin in {start}. '
-                f'New action for THIS scene: {action}. End in {end}. '
-                f'Preserve character identity, costumes and physical continuity; '
-                f'each shot must add a NEW event, not repeat the previous shot. '
-                f'Visual direction: {visual}. One coherent shot, no text, no subtitles.')
-    slot = i % len(SEQUENCE_TABLEAUX)
-    label, action = SEQUENCE_TABLEAUX[slot]
-    variation = i // len(SEQUENCE_TABLEAUX)
-    changes = ['wide establishing shot','tracking medium shot','low-angle dynamic shot',
-               'intimate close-up','high-angle moving shot','side-profile dolly shot']
-    shot = changes[(i + variation) % len(changes)]
-    return (f'{subject}{idea_context}INDEPENDENT MUSIC VIDEO TABLEAU {i+1}/{total}: {label}. '
-            f'Action: {action}; unique variation {variation+1}. '
-            f'Camera: {shot}. Create a distinctly new composition, movement and visual situation '
-            f'compared with other tableaux; character identity stays recognizable but '
-            f'location and costume MAY change between independent sequences. '
-            f'Visual direction: {visual}. Single coherent shot, no text, no subtitles.')
-
+STYLES = ['Cinématique photoréaliste', 'Clip musical', 'Animation 3D', 'Fantastique', 'Vintage', 'Minimaliste']
 RATIOS = {'Vertical 9:16': (360, 640), 'Horizontal 16:9': (640, 360), 'Carré 1:1': (512, 512)}
 SCENE_SECONDS = 5
 
@@ -315,34 +231,52 @@ DANCE_STAGES = [
 
 
 def story_step(index, total, mood, story_mode, lyric_excerpt):
-    """Build a complete progressive narrative, one distinct physical beat per shot."""
+    """Progressive choreography with a distinct beat for every shot."""
     if mood in ('dance', 'romantic'):
         steps = [(stage, action) for stage, (_, actions) in enumerate(DANCE_STAGES)
                  for action in actions]
-        # For 36 shots, expand the 29 base moves into small variations without
-        # resetting the dancers or repeating the same action verbatim.
-        progress = index / max(total - 1, 1)
-        slot = min(len(steps) - 1, int(progress * (len(steps) - 1)))
-        stage, action = steps[slot]
-        repeats = sum(1 for k in range(index) if
-                      min(len(steps)-1, int(k / max(total-1, 1) * (len(steps)-1))) == slot)
-        if repeats:
-            action += ("; then they finish the movement with a small rhythmic weight shift"
-                       if repeats % 2 else "; then they add a gentle synchronized half-step")
-        # A concrete end state that the next prompt can inherit, not a vague stage label.
-        end_pose = f"Both dancers have just completed this action: {action}; {DANCE_STAGES[stage][0]}"
-        start_pose = ('the exact positions and body orientation from the reference image'
-                      if index == 0 else 'the final position from the preceding shot')
+        # A larger storyboard needs fresh actions, not a recycled generic move.
+        # Each pass keeps the stage's relationship and physical continuity.
+        if total <= len(steps):
+            slot = min(len(steps)-1, int(index * len(steps) / max(total, 1)))
+            stage, action = steps[slot]
+        else:
+            slot = min(len(steps)-1, int(index * len(steps) / max(total, 1)))
+            stage, action = steps[slot]
+            occurrence = sum(1 for k in range(index) if
+                             min(len(steps)-1, int(k * len(steps) / total)) == slot)
+            if occurrence:
+                embellishments = [
+                    'and finish with a precise alternating heel tap',
+                    'and follow with a small coordinated quarter turn',
+                    'then add two crisp steps in the opposite direction',
+                    'and complete the phrase with a playful synchronized bounce',
+                    'then reverse the lead with a smooth change of weight',
+                    'and end with a distinct cross-step and head turn',
+                ]
+                action = action.rstrip(' .;') + '; ' + embellishments[(index + slot) % len(embellishments)]
+        position = DANCE_STAGES[stage][0]
+        start_pose = ('the exact positions and orientation in the supplied reference image'
+                      if index == 0 else 'the precise final pose of the previous shot')
+        end_pose = f'Both characters finish the described movement, {position}, ready to continue naturally'
     else:
         actions = BEATS.get(mood, BEATS['dreamlike'])
-        slot = min(len(actions)-1, int(index / max(total,1) * len(actions)))
+        slot = min(len(actions)-1, int(index * len(actions) / max(total, 1)))
         action = actions[slot]
-        step_number = index - int(slot * total / len(actions))
-        if step_number > 0:
-            action += f'; extend this moment with a distinct natural gesture, variation {step_number + 1}'
+        occurrence = sum(1 for k in range(index) if
+                         min(len(actions)-1, int(k * len(actions) / total)) == slot)
+        if occurrence:
+            variations = [
+                'then deliberately change direction and examine a new detail',
+                'then react with a different expressive physical gesture',
+                'then move toward a new point of interest within the scene',
+                'then respond to the situation with a decisive change of posture',
+                'then shift position to reveal the next part of the action',
+            ]
+            action += '; ' + variations[(index + slot) % len(variations)]
         start_pose = ('the exact positions in the reference image' if index == 0
-                      else 'the final position from the preceding shot')
-        end_pose = f'the character has just finished: {action}'
+                      else 'the precise final pose of the previous shot')
+        end_pose = f'The character finishes this particular action: {action}'
     if story_mode == 'lyrics' and lyric_excerpt.strip():
         feeling = scene_mood(lyric_excerpt, index, total)
         cue = {'romantic': 'gentle affectionate expression',
@@ -362,10 +296,10 @@ def image_guided_prompt(scene, style, reference_description, custom_idea='', moo
     action = re.sub(r'\s+', ' ', action)[:360]
     subjects = reference_description.strip()
     identity = (f'Same characters as the reference image: {subjects}. ' if subjects else
-                'Keep exactly the characters from the reference image. ')
+                'Use the uploaded reference image as the definitive visual identity: preserve the exact original characters, faces, body shapes, proportions, colors, clothing and accessories. ')
     return (f'{identity}Shot {index+1}/{total_scenes}. '
             f'Start: {start_pose}. Action: {action}. End: {end_pose}. '
-            f'Continue directly from the previous shot, same room and outfits. '
+            f'Preserve the original characters exactly; never restyle or replace them. Continue from the previous shot with the same room and outfits. '
             f'{style}. One continuous camera shot, no new characters, no text.')
 
 
@@ -436,7 +370,7 @@ def refresh_following_prompts(scenes, start, style, identity, mood, idea, story_
 def create_scenes(lyrics, duration, style, ratio, idea, scene_length=5):
     lines = [line.strip() for line in lyrics.splitlines()
              if line.strip() and not re.match(r'^\\[.*\\]$', line.strip())]
-    count = min(240, max(1, math.ceil(duration / scene_length)))
+    count = max(1, math.ceil(duration / scene_length))
     result = []
     for index in range(count):
         start = index * scene_length
@@ -605,17 +539,15 @@ with st.container(border=True):
     music_ext = Path(audio_file.name).suffix.lower() if audio_file else ''
     detected = audio_duration(music, music_ext) if music else None
     if detected:
-        st.success(f'Durée de la musique détectée : {detected:.1f} secondes')
-    elif audio_file:
-        st.warning('Durée audio non détectée sur ce serveur : indique la durée manuellement.')
+        st.success(f'Durée de la musique : {detected:.1f} secondes')
     manual_duration = st.number_input('Durée si aucune musique disponible (secondes)',
                                       min_value=5, max_value=1200, value=180, step=5)
     duration = detected or float(manual_duration)
-    production_mode = st.radio('🎬 Type de réalisation',
-        ['🎞️ Court-métrage — histoire continue', '🎵 Clip — séquences indépendantes'],
-        help='Court-métrage : récit et continuité. Clip : tableaux variés, sans obligation de raccord.')
-    scene_length = st.selectbox("Durée de chaque séquence (secondes)", [5, 10, 15, 3, 4, 6, 8], index=0)
-    style = st.selectbox('Univers visuel (20 styles)', STYLES)
+    if music and detected is None:
+        st.warning("Impossible de lire la durée du morceau : la durée manuelle sera utilisée. Vérifie-la avant de préparer les scènes.")
+    scene_length = st.selectbox("Durée des séquences (secondes)", [5, 3, 4, 6, 8, 10, 15], index=0)
+    st.caption(f"🎬 {math.ceil(duration / scene_length)} scènes prévues · {duration:.1f} s de musique · {scene_length} s par séquence (dernière scène ajustée si nécessaire).")
+    style = st.selectbox('Style', STYLES)
     ratio = st.selectbox('Format', list(RATIOS))
     reference = st.file_uploader('Image du personnage (facultative)',
                                  type=['png', 'jpg', 'jpeg', 'webp'])
@@ -656,7 +588,7 @@ with st.container(border=True):
                 st.rerun()
             except Exception as exc:
                 st.warning(f"Analyse avancée indisponible : {exc}")
-    st.radio('🎼 Synchronisation narrative',
+    st.radio('🎞️ Chronologie du clip',
              ['Histoire continue de A à Z', 'Histoire continue synchronisée aux paroles'],
              key='story_timeline_mode',
              help='Dans les deux modes, les personnages et leurs mouvements se suivent. Le second adapte les expressions et les temps forts aux paroles.')
@@ -667,11 +599,11 @@ with st.container(border=True):
         "Automatique selon la chanson", "Danse et humour", "Romantique",
         "Mélancolique", "Énergie et dépassement", "Onirique et surprenant"
     ], key="director_mood")
-    st.caption("Les prompts sont générés pour toutes les scènes. L'analyse automatique du rythme et des temps forts musicaux n'est pas encore intégrée ; la durée est détectée quand possible.")
+    st.caption("Le réalisateur transforme les émotions de la chanson en actions à l'écran ; il ne recopie pas les paroles.")
     if reference:
         st.caption("L'image de départ est jointe aux exports. Pour une fidélité visuelle réelle, choisis un moteur image-vers-vidéo et fournis-lui cette image.")
-    if st.button('✨ Générer automatiquement le storyboard complet', type='primary', use_container_width=True):
-        if not lyrics.strip() and not idea.strip() and not reference and not music:
+    if st.button('✨ Préparer toutes les scènes', type='primary', use_container_width=True):
+        if not lyrics.strip() and not idea.strip() and not reference:
             st.warning('Ajoute des paroles, une idée ou une image.')
         else:
             st.session_state.scenes = create_scenes(lyrics, duration, style, ratio, idea or ('Animate the provided reference character in a cinematic scene' if reference else ''), scene_length)
@@ -712,26 +644,13 @@ with st.container(border=True):
                 item['prompt'] = chained_prompt(item, st.session_state.scenes[j-1], style,
                     st.session_state.visual_reference_description, selected_mood,
                     len(st.session_state.scenes), idea, timeline_mode)
-            # Generate full storyboard in both modes, no continuity between clip tableaux.
-            st.session_state.production_mode = production_mode
-            lyrics_sync = timeline_mode == 'lyrics'
-            for generated_scene in st.session_state.scenes:
-                generated_scene['prompt'] = storyboard_prompt(
-                    generated_scene, len(st.session_state.scenes), production_mode,
-                    style, st.session_state.visual_reference_description, idea,
-                    selected_mood, lyrics_sync)
-                if production_mode.startswith('🎵'):
-                    generated_scene['planned_end'] = ''
-            if st.session_state.scenes and st.session_state.finale_action.strip():
-                st.session_state.scenes[-1]['prompt'] += (' Final action: '
-                    + st.session_state.finale_action.strip() + '.')
             for k in list(st.session_state.keys()):
                 if re.fullmatch(r"prompt_\\d+", k):
                     del st.session_state[k]
             st.session_state.clip = None
             st.session_state.scene_selection = []
             st.session_state.select_all = False
-            st.success(f'{len(st.session_state.scenes)} scènes préparées !')
+            st.success(f'{len(st.session_state.scenes)} prompts évolutifs préparés ! Copie-les tous ci-dessous ou scène par scène.')
     if st.session_state.scenes and st.button("🎬 Réalisation IA avancée (facultatif, clé API nécessaire)",
                                              use_container_width=True):
         try:
@@ -763,84 +682,7 @@ with st.container(border=True):
 
 if st.session_state.scenes:
     scenes = st.session_state.scenes
-    # Assistant de production image-par-image, sans contrôle du navigateur tiers.
-    with st.container(border=True):
-        st.subheader("🎬 Assistant scène par scène — LoreMotion")
-        st.caption("1. Copie le prompt et fournis l'image dans LoreMotion. 2. Génère la séquence. "
-                   "3. Importe ici la dernière image obtenue. 4. Le prompt suivant est recalculé.")
-        if 'guided_index' not in st.session_state:
-            st.session_state.guided_index = 0
-        guided_index = st.number_input("Scène en cours", min_value=1, max_value=len(scenes),
-                                      value=min(len(scenes), st.session_state.guided_index+1),
-                                      step=1, key="guided_scene_number") - 1
-        st.session_state.guided_index = guided_index
-        current = scenes[guided_index]
-        st.progress(guided_index / len(scenes), text=f"Scène {guided_index+1} sur {len(scenes)}")
-        st.code(current['prompt'], language=None)
-        st.caption("Copie le prompt ci-dessus avec l'icône du bloc.")
-        st.link_button("🌐 Ouvrir LoreMotion", "https://loremotion.com/generate/", use_container_width=True)
-        if guided_index > 0 and st.session_state.get('production_mode', '').startswith('🎞️'):
-            previous = scenes[guided_index-1]
-            prior_image = previous.get('last_frame')
-            if prior_image:
-                st.image(prior_image, caption="Image de raccord issue de la scène précédente", width=230)
-                st.download_button("⬇️ Image à envoyer dans LoreMotion", prior_image,
-                                   file_name=f"scene_{guided_index+1:03d}_depart.png",
-                                   mime="image/png", key=f"guided_frame_dl_{guided_index}",
-                                   use_container_width=True)
-        st.markdown("**Vidéo terminée ? Ajoute sa dernière image pour préparer la suite.**")
-        frame_upload = st.file_uploader("Dernière image de cette scène (PNG/JPG/WEBP)",
-                                        type=['png','jpg','jpeg','webp'],
-                                        key=f"guided_end_image_{guided_index}")
-        if frame_upload:
-            raw = frame_upload.getvalue()
-            st.image(raw, caption="Image finale reçue", width=220)
-            fingerprint = __import__('hashlib').sha256(raw).hexdigest()
-            if current.get('guided_image_hash') != fingerprint:
-                current['last_frame'] = raw
-                current['guided_image_hash'] = fingerprint
-                if guided_index+1 < len(scenes):
-                    next_scene = scenes[guided_index+1]
-                    next_scene['image'] = raw
-                    next_scene['prompt_locked'] = False
-                    try:
-                        with st.spinner("Analyse visuelle de l'image…"):
-                            description = describe_image_free(raw)
-                        current['actual_end'] = description
-                        st.session_state[f'actual_end_{guided_index}'] = description
-                        st.success("Image analysée automatiquement ; le prompt suivant est actualisé.")
-                    except Exception as exc:
-                        current['actual_end'] = "exact visible positions and appearance in the uploaded final frame"
-                        st.warning("Analyse visuelle indisponible : la continuité s'appuiera "
-                                   "sur l'image fournie, sans description précise. "
-                                   "Le modèle gratuit nécessite ses dépendances et de la mémoire serveur.")
-                    next_scene['prompt'] = chained_prompt(
-                        next_scene, current, style,
-                        st.session_state.visual_reference_description,
-                        st.session_state.get('current_mood', 'dreamlike'),
-                        len(scenes), idea,
-                        st.session_state.get('timeline_mode', 'continuous'))
-                    next_scene['prompt'] = (
-                        "USE THE ATTACHED IMAGE AS THE EXACT FIRST FRAME OF THIS SHOT. "
-                        "Preserve the visible characters, facial features, costumes, "
-                        "background, positions and camera framing. " + next_scene['prompt'])
-                    st.session_state[f'prompt_{guided_index+1}'] = next_scene['prompt']
-                    refresh_following_prompts(
-                        scenes, guided_index+2, style,
-                        st.session_state.visual_reference_description,
-                        st.session_state.get('current_mood', 'dreamlike'), idea,
-                        st.session_state.get('timeline_mode', 'continuous'))
-                else:
-                    st.success("Dernière scène terminée !")
-        if guided_index+1 < len(scenes):
-            if st.button("➡️ Passer à la scène suivante", use_container_width=True):
-                st.session_state.guided_index = guided_index+1
-                st.session_state.guided_scene_number = guided_index+2
-                st.rerun()
-        st.caption("Les images et prompts restent dans cette session Streamlit. "
-                   "Télécharge régulièrement une sauvegarde : une session serveur peut expirer. "
-                   "L'analyse automatique de l'image dépend du modèle de vision disponible.")
-    st.subheader(f'3. Tes scènes ({len(scenes)})')
+    st.subheader(f'3. Tes scènes ({len(scenes)}) — prompts évolutifs V14.2')
     st.success(f'Les {len(scenes)} prompts sont déjà écrits dans l’ordre, avec une progression complète du premier au dernier plan.')
     all_prompts = '\n\n'.join(
         f"SCÈNE {j+1:02d} — {item['start']:.0f}–{item['end']:.0f} s\n{item['prompt']}"
