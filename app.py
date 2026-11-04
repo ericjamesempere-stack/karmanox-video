@@ -1,155 +1,123 @@
-import io, math, json, wave, re, base64
-from pathlib import Path
+import os, io, re, json, math, wave, base64, urllib.request, urllib.error
 import streamlit as st
+from mutagen import File as AudioFile
 
-st.set_page_config(page_title='KarmaClip AI — Studio', page_icon='🎬', layout='wide')
-st.title('🎬 KarmaClip AI — Studio')
-st.caption('Analyser → Imaginer → Générer → Monter · Mode manuel, sans automatisation du navigateur')
+st.set_page_config(page_title='KarmaClip Agent IA', page_icon='🎬', layout='centered')
+st.title('🎬 KarmaClip Agent IA')
+st.caption('Un point de départ, un réalisateur IA, un storyboard complet. Mode automatique ou manuel.')
 
-with st.expander('🧠 Intelligence artificielle : transcription et vision'):
-    api_key=st.text_input('Clé API OpenAI (facultative)',type='password',help='Ne jamais publier une clé dans GitHub.')
-    st.caption('Les appels à l’API peuvent être payants. La transcription du chant est parfois imparfaite.')
+def secret(name):
+    try: return str(st.secrets.get(name, os.environ.get(name, ''))).strip()
+    except Exception: return os.environ.get(name, '').strip()
 
-def get_client():
-    from openai import OpenAI
-    return OpenAI(api_key=api_key, timeout=90)
-
-def transcribe(upload):
-    if len(upload.getvalue())>25*1024*1024:
-        raise ValueError('Fichier supérieur à 25 Mo : exporter une copie MP3 compressée pour la transcription.')
-    f=io.BytesIO(upload.getvalue()); f.name=upload.name
-    return get_client().audio.transcriptions.create(model='whisper-1',file=f).text
-
-def inspect_image(upload):
-    ext=upload.name.rsplit('.',1)[-1].lower()
-    mime={'png':'image/png','webp':'image/webp'}.get(ext,'image/jpeg')
-    data=base64.b64encode(upload.getvalue()).decode('ascii')
-    res=get_client().chat.completions.create(model='gpt-4.1-mini',messages=[{'role':'system','content':'Décris précisément les éléments VISIBLES de cette image en français. Nombre de personnages, forme, visage, couleurs, vêtements, accessoires, positions, décor, esthétique. N’invente rien. Fournis une fiche de continuité réutilisable pour des prompts de vidéo, sans transformer les personnages.'},{'role':'user','content':[{'type':'text','text':'Crée une fiche d’identité visuelle permanente.'},{'type':'image_url','image_url':{'url':'data:'+mime+';base64,'+data}}]}],max_tokens=850)
-    return res.choices[0].message.content
-
-STYLES=['Cinéma réaliste','Danse et chorégraphie','Fête et festival','Clip musical','Comédie','Drame','Romance','Thriller','Science-fiction','Fantastique','Action','Aventure','Documentaire','Animation 3D','Manga','Vintage','Expérimental','Western','Sport','Poétique']
-SITES={'LoreMotion':'https://loremotion.com/generate/','Kling AI':'https://klingai.com/','Wan AI':'https://wan.video/','LTX Studio':'https://ltx.studio/','Vidu':'https://www.vidu.com/','CapCut':'https://www.capcut.com/'}
-
-def audio_seconds(upload):
-    if upload is None:return None
-    raw=upload.getvalue()
-    if upload.name.lower().endswith('.wav'):
-        try:
-            with wave.open(io.BytesIO(raw),'rb') as w:return w.getnframes()/w.getframerate()
-        except Exception:pass
+def audio_length(file):
+    if not file: return None
     try:
-        from mutagen import File
-        a=File(io.BytesIO(raw))
-        return float(a.info.length) if a and a.info else None
-    except Exception:return None
+        data=file.getvalue()
+        if file.name.lower().endswith('.wav'):
+            with wave.open(io.BytesIO(data)) as f: return f.getnframes()/f.getframerate()
+        sound=AudioFile(io.BytesIO(data))
+        return float(sound.info.length) if sound and sound.info else None
+    except Exception: return None
 
-def lines_of(text):
-    return [re.sub(r'^\s*\[[^]]+\]\s*','',line).strip() for line in text.splitlines() if line.strip() and not re.match(r'^\s*\[',line)]
+def chat_call(provider, key, model, user_content):
+    endpoint={'Groq':'https://api.groq.com/openai/v1/chat/completions','OpenRouter':'https://openrouter.ai/api/v1/chat/completions'}[provider]
+    payload={'model':model,'messages':[{'role':'system','content':SYSTEM},{'role':'user','content':user_content}], 'temperature':0.75,'max_tokens':8192}
+    headers={'Content-Type':'application/json','Authorization':'Bearer '+key}
+    if provider=='OpenRouter':headers['HTTP-Referer']='https://render.com'
+    request=urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(request,timeout=110) as response: result=json.load(response)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f'{provider} HTTP {e.code}: {e.read(350).decode(errors="replace")}')
+    return result['choices'][0]['message']['content']
 
-def progression(i,n):
-    p=(i+.5)/n
-    if p<.12:return 'Establish the characters, setting and initial physical situation with a clear introductory action.'
-    if p<.3:return 'Introduce a new physical interaction and build on the prior scene; visibly advance the situation.'
-    if p<.55:return 'Increase complexity and energy with a distinct new action; make the progression unmistakable.'
-    if p<.75:return 'Develop an unexpected but coherent turn, reaction or variation; avoid repeating earlier motions.'
-    if p<.91:return 'Build toward the main visual peak with the strongest meaningful action so far.'
-    return 'Resolve the ongoing action naturally and create a satisfying visual ending.'
+SYSTEM='''Tu es un réalisateur de clips vidéo expérimenté. Réponds uniquement avec un objet JSON valide, sans Markdown, de forme:
+{"title":"titre","synopsis":"histoire originale avec début, progression et fin","direction":"story|dance|variety|performance|abstract","style":"style visuel","proposals":[{"title":"...","pitch":"..."},{"title":"...","pitch":"..."},{"title":"...","pitch":"..."}],"scenes":[{"action":"action narrative concrète en français","prompt":"prompt vidéo détaillé en anglais"}]}
+Respecte EXACTEMENT le nombre de scènes. Chaque scène est différente, causale et filmable. Si danse continue: mêmes personnages, positions, mouvements corporels raccordés entre scènes. Si paroles: raconter une histoire liée au sens sans sous-titres. Si image: identité et costume constants, ne pas inventer de détails invisibles. Les prompts incluent mouvement, cadrage, décor, lumière, continuité et action finale. Ne promets pas de génération vidéo. N'invente pas d'analyse sonore: les données musicales ne contiennent que durée et nom de fichier. Évite tout texte à l'image.'''
 
-with st.expander('1 · Sources du projet', expanded=True):
-    c1,c2=st.columns(2)
-    with c1:
-        audio=st.file_uploader('Musique WAV / MP3 (facultatif)',type=['wav','mp3'])
-        photo=st.file_uploader('Image de référence (facultative)',type=['png','jpg','jpeg','webp'])
-        if photo:st.image(photo,caption='Référence visuelle — à joindre aussi au générateur vidéo',width=260)
-    with c2:
-        description=st.text_area('Idée / description (facultative)',placeholder='Personnages, situation, intention, décor…',height=100)
-        lyrics=st.text_area('Paroles ou transcription (facultatives)',placeholder='Colle les paroles pour activer le mode fidèle aux paroles',height=120)
+def parse_json(raw):
+    raw=raw.strip()
+    if raw.startswith('```'):raw=re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.I)
+    try:return json.loads(raw)
+    except json.JSONDecodeError:
+        m=re.search(r'\{.*\}',raw,re.S)
+        if m:return json.loads(m.group())
+        raise
 
-if 'auto_transcription' not in st.session_state:st.session_state.auto_transcription=''
-if 'auto_visual' not in st.session_state:st.session_state.auto_visual=''
-if audio and st.button('🎤 Transcrire les paroles automatiquement'):
-    if not api_key:st.warning('Renseigne une clé API dans Intelligence artificielle.')
+def plan(idea, photo, music, duration, count, mode, direction, style, ratio):
+    groq=secret('GROQ_API_KEY');router=secret('OPENROUTER_API_KEY')
+    if not groq and not router:raise RuntimeError('Configure GROQ_API_KEY ou OPENROUTER_API_KEY dans Render > Environment.')
+    data={'idee_ou_paroles':idea or 'Invente une histoire originale pour un clip, avec une progression visuelle et une conclusion.', 'nombre_de_scenes':count,'duree_totale_secondes':duration,'duree_par_scene':round(duration/count,2),'mode':mode,'direction_imposee':direction if mode=='Manuel' else 'choisir automatiquement','style_impose':style if mode=='Manuel' else 'choisir automatiquement','ratio':ratio,'musique':{'nom':music.name,'duree':audio_length(music)} if music else None,'image_reference':bool(photo)}
+    content=[{'type':'text','text':json.dumps(data,ensure_ascii=False)}]
+    if photo:
+        if photo.size>3*1024*1024:raise ValueError('Image trop volumineuse pour cette version : 3 Mo maximum.')
+        ext=photo.name.lower().split('.')[-1]
+        mime={'png':'image/png','webp':'image/webp'}.get(ext,'image/jpeg')
+        content.append({'type':'image_url','image_url':{'url':'data:'+mime+';base64,'+base64.b64encode(photo.getvalue()).decode()}})
+    errors=[]
+    # OpenRouter fallback for text only: its free router may not support vision.
+    providers=[]
+    if groq:providers.append(('Groq',groq,secret('GROQ_VISION_MODEL') if photo else secret('GROQ_TEXT_MODEL')))
+    if router and not photo:providers.append(('OpenRouter',router,secret('OPENROUTER_MODEL') or 'openrouter/free'))
+    if photo and not groq:raise RuntimeError('Pour analyser une image, configure une clé Groq et un modèle vision compatible. OpenRouter est réservé au texte dans cette version.')
+    for provider,key,model in providers:
+        model=model or ('meta-llama/llama-4-scout-17b-16e-instruct' if photo else 'llama-3.3-70b-versatile')
+        try:
+            result=parse_json(chat_call(provider,key,model,content))
+            scenes=result.get('scenes',[])
+            if len(scenes)!=count or not all(isinstance(s,dict) and s.get('prompt') and s.get('action') for s in scenes):raise ValueError('Nombre de scènes ou prompts incomplets')
+            result['provider']=provider;result['model']=model
+            return result
+        except Exception as e:errors.append(str(e)[:350])
+    raise RuntimeError('Échec des fournisseurs : '+' | '.join(errors))
+
+if 'result' not in st.session_state:st.session_state.result=None
+st.subheader('1 · Ton point de départ')
+idea=st.text_area('Idée, paroles ou description TikTok (facultatif)',placeholder='Laisse vide si tu préfères fournir uniquement une image ou une musique.',height=130)
+photo=st.file_uploader('Image de référence (facultative)',type=['png','jpg','jpeg','webp'])
+if photo:st.image(photo,width=230)
+music=st.file_uploader('Musique (facultative)',type=['wav','mp3'])
+length=audio_length(music)
+if length:st.caption(f'Durée musicale détectée : {length:.1f} secondes')
+count=st.number_input('Nombre de scènes',min_value=1,max_value=60,value=6,step=1)
+source=st.radio('Durée totale', ['Selon les scènes','Durée de la musique','Personnalisée'],horizontal=False)
+per=st.selectbox('Durée indicative par scène', [3.5,5.0,6.0,8.0,10.0],index=1)
+custom=st.number_input('Durée personnalisée en secondes',min_value=3.0,max_value=900.0,value=30.0)
+duration=float(length if source=='Durée de la musique' and length else custom if source=='Personnalisée' else count*per)
+st.caption(f'{int(count)} scènes · {duration:.1f} secondes · environ {duration/count:.1f} secondes par scène')
+st.subheader('2 · Qui dirige ?')
+mode=st.radio('Mode', ['Automatique','Manuel'],horizontal=True)
+direction='';style='';ratio='9:16'
+if mode=='Manuel':
+    direction=st.selectbox('Type de clip',['story','dance','variety','performance','abstract'])
+    style=st.selectbox('Style',['Cinéma photoréaliste','Animation 3D','Manga','Vintage','Surréaliste','Documentaire'])
+    ratio=st.selectbox('Format',['9:16','16:9','1:1'])
+if st.button('🧠 L’agent crée toute mon histoire',type='primary',use_container_width=True):
+    if not (idea.strip() or photo or music):st.warning('Ajoute au moins une idée, une image ou une musique.')
     else:
         try:
-            with st.spinner('Transcription en cours…'):st.session_state.auto_transcription=transcribe(audio)
-        except Exception as e:st.error(f'Transcription impossible : {e}')
-if photo and st.button('👁️ Analyser l’image automatiquement'):
-    if not api_key:st.warning('Renseigne une clé API dans Intelligence artificielle.')
-    else:
-        try:
-            with st.spinner('Analyse visuelle en cours…'):st.session_state.auto_visual=inspect_image(photo)
-        except Exception as e:st.error(f'Analyse impossible : {e}')
-transcribed=st.text_area('Paroles reconnues (à vérifier et corriger)',value=st.session_state.auto_transcription,height=110)
-visual=st.text_area('Fiche visuelle IA (à vérifier et corriger)',value=st.session_state.auto_visual,height=140)
-all_lyrics=lyrics.strip() or transcribed.strip()
-
-with st.expander('2 · Direction artistique',expanded=True):
-    style=st.selectbox('Univers visuel',STYLES)
-    method=st.radio('Construction des prompts',['Histoire imaginative','Suivre les paroles'],horizontal=True)
-    continuity=st.radio('Raccord entre les scènes',['Continuité globale','Tableaux indépendants'],horizontal=True)
-    shot=st.selectbox('Durée cible de chaque séquence', [3,4,5,6,8,10,15],index=2)
-    identity=st.text_area('Identité des personnages — description à verrouiller',placeholder='Décris précisément les personnages de l’image : silhouettes, visages, couleurs, vêtements, accessoires. Ne rien inventer qui ne soit pas visible.',height=90)
-    if photo and not (identity or visual):st.warning('Analyse l’image ou renseigne une fiche visuelle pour verrouiller les personnages.')
-    detected=audio_seconds(audio)
-    if detected:st.success(f'Durée audio détectée : {detected:.1f} secondes')
-    else:st.info('Durée audio non disponible : indique une durée manuelle. La lecture MP3 nécessite mutagen dans requirements.txt.')
-    manual=st.number_input('Durée totale si aucun audio lisible (secondes)',min_value=1,max_value=7200,value=180)
-    total=detected or float(manual)
-    count=math.ceil(total/shot)
-    st.write(f'**{count} scènes** prévues pour {total:.1f} secondes, par segments de {shot} secondes maximum.')
-
-st.subheader('3 · Analyse de l’intention')
-if 'analysis' not in st.session_state:st.session_state.analysis=''
-if st.button('🔍 Analyser les sources',type='primary'):
-    sources=[]
-    if audio:sources.append(f'morceau audio de {total:.1f} secondes (durée détectée, pas de reconnaissance musicale)')
-    if photo:sources.append('image de référence fournie (non analysée visuellement dans cette version)')
-    if description:sources.append(f'idée : {description.strip()}')
-    if all_lyrics:sources.append('paroles fournies ou transcrites')
-    if visual:sources.append('fiche visuelle analysée')
-    st.session_state.analysis=('Sources : '+('; '.join(sources) if sources else 'aucune source — création libre')+'\n'
-        f'Direction : {style}. Mode : {method}. Raccord : {continuity}. '
-        f'Durée : {total:.1f} s, {count} scènes. '
-        'Intention à préciser : trajectoire émotionnelle, évolution des actions, dénouement. '
-        'Cette synthèse est éditable. La transcription et la vision sont disponibles via les boutons dédiés et une clé API.')
-analysis=st.text_area('Synthèse artistique — modifiable avant la génération',value=st.session_state.analysis,height=145)
-
-st.subheader('4 · Storyboard prêt à copier')
-st.caption('La transcription et la vision sont intégrées via API ; le générateur de storyboard reste basé sur des règles et sera à enrichir avec un réalisateur IA.')
-if method=='Suivre les paroles' and not all_lyrics:st.warning('Ajoute les paroles pour obtenir un suivi fidèle. Un fichier audio seul ne permet pas ici de transcrire les paroles.')
-if st.button('🎞️ Générer tous les prompts'):
-    words=lines_of(all_lyrics)
-    prompts=[]
-    base=(description.strip() or 'Create a coherent original visual narrative based on the chosen direction.')
-    for i in range(count):
-        start=i*shot; end=min(total,(i+1)*shot)
-        lyric_part=''
-        if method=='Suivre les paroles' and words:
-            lo=int(i*len(words)/count);hi=max(lo+1,int((i+1)*len(words)/count))
-            lyric_part='Lyric meaning for this moment: '+ ' / '.join(words[lo:hi])+'. Interpret these words visually, without showing subtitles. '
-        scene=(f'SCENE {i+1}/{count} | {start:.1f}–{end:.1f} seconds\n'
-          f'Visual direction: {style}. Original concept: {base}. '
-          f'{lyric_part}Narrative instruction: {progression(i,count)} '
-          f'Unique beat: scene {i+1} must show a distinct purposeful action and a new reaction or change of spatial arrangement. '
-          f'Continuity: {"Preserve the established characters, environment and physical cause-and-effect from the previous scene; start from its last pose." if continuity=="Continuité globale" else "This shot can change environment and action; retain the established character identity."} '
-          f'Character identity: {(identity or visual).strip() if (identity or visual).strip() else "Match the supplied reference image exactly; do not redesign the subject or introduce a different character style."} '
-          'Precise coherent body movement, natural anatomy for the original subject, intentional framing and lighting. '
-          'No visual redesign, no character replacement, no text, no subtitles. '
-          'The next shot should be able to follow this one naturally.' )
-        prompts.append({'scene':i+1,'start':round(start,2),'end':round(end,2),'prompt':scene})
-    st.session_state.prompts=prompts
-
-prompts=st.session_state.get('prompts',[])
-if prompts:
-    for item in prompts:
-        with st.expander(f"Scène {item['scene']} · {item['start']:g}–{item['end']:g} s",expanded=item['scene']==1):
-            st.code(item['prompt'],language=None)
-            st.caption('Copie le texte ci-dessus, puis joins l’image de référence sur LoreMotion.')
-    st.download_button('⬇️ Télécharger tous les prompts (.txt)',data='\n\n'.join(x['prompt'] for x in prompts),file_name='karmaclip_prompts.txt',mime='text/plain')
-    st.download_button('⬇️ Télécharger le storyboard (.json)',data=json.dumps(prompts,ensure_ascii=False,indent=2),file_name='karmaclip_storyboard.json',mime='application/json')
-
-st.subheader('5 · Générer et monter')
-st.write('Génération manuelle : copie le prompt et joins l’image dans le service choisi. Les liens ouvrent les plateformes ; ils ne transmettent pas automatiquement les fichiers.')
-for name,url in SITES.items():
-    st.markdown(f'**[{name}]({url})**'+(' — priorité' if name=='LoreMotion' else ' — montage' if name=='CapCut' else ' — alternative'))
-st.caption('La durée du dernier segment est un repère de montage : le moteur vidéo peut imposer une durée fixe. Ajuste la dernière vidéo dans CapCut.')
+            with st.spinner('Le réalisateur IA construit ton clip…'):
+                st.session_state.result=plan(idea.strip(),photo,music,duration,int(count),mode,direction,style,ratio)
+            st.success('Storyboard IA créé.')
+        except Exception as e:st.error(str(e))
+result=st.session_state.result
+if result:
+    st.subheader('3 · Le projet de l’agent')
+    st.markdown('**'+str(result.get('title','Mon clip'))+'**')
+    st.write(result.get('synopsis',''))
+    st.caption('Modèle : '+result.get('provider','')+' · '+result.get('model',''))
+    for p in result.get('proposals',[]):
+        st.info(str(p.get('title',''))+' — '+str(p.get('pitch','')))
+    full=[]
+    for i,scene in enumerate(result['scenes']):
+        start=duration*i/count;end=duration*(i+1)/count
+        with st.expander(f'Scène {i+1} · {start:.1f}–{end:.1f} s',expanded=i==0):
+            st.write(scene['action'])
+            edited=st.text_area('Prompt vidéo (modifiable)',value=scene['prompt'],key=f'prompt_{id(result)}_{i}',height=180)
+            full.append(f'SCÈNE {i+1} | {start:.1f}–{end:.1f} s\n{edited}')
+    st.download_button('⬇️ Télécharger tous les prompts', '\n\n'.join(full),'KarmaClip_prompts.txt',use_container_width=True)
+    st.download_button('⬇️ Télécharger le storyboard JSON',json.dumps(result,ensure_ascii=False,indent=2),'KarmaClip_storyboard.json',use_container_width=True)
+    st.link_button('🎥 Ouvrir LoreMotion (génération manuelle)','https://loremotion.com/',use_container_width=True)
+st.divider()
+st.caption('L’IA est réelle lorsque les clés sont configurées. Les quotas gratuits peuvent changer. Le contenu audio n’est pas écouté ni transcrit : seule la durée est utilisée. Aucune génération vidéo ou montage automatique sur LoreMotion.')
