@@ -3,13 +3,13 @@ NiftyVid protocol inspiration; no paid API or account required.
 """
 import io
 import json
-import math
 import requests
 import streamlit as st
 from PIL import Image, ImageDraw, ImageOps
 
 SPACE = "https://cbensimon-wan2-2-fp8da-aoti-preview2.hf.space"
-MAX_IMAGE = 8 * 1024 * 1024
+MAX_IMAGE = 25 * 1024 * 1024
+MAX_PIXELS = 1280
 
 def make_cartoon_body(image_bytes, clothing="#3778a8"):
     """Offline fallback: compose a simple 2D cartoon body beneath a portrait.
@@ -94,55 +94,76 @@ def generate(image_bytes, filename, prompt):
                         return result.content
         raise RuntimeError("Le GPU gratuit n'a pas terminé la génération.")
 
+def prepare_upload(upload):
+    """Normalize common Android camera images to a small JPEG/PNG."""
+    raw = upload.getvalue()
+    if len(raw) > MAX_IMAGE:
+        raise ValueError("Photo trop lourde (25 Mo maximum). Choisis une version plus petite.")
+    try:
+        with Image.open(io.BytesIO(raw)) as original:
+            img = ImageOps.exif_transpose(original)
+            img.thumbnail((MAX_PIXELS, MAX_PIXELS), Image.Resampling.LANCZOS)
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                img = img.convert("RGBA")
+                background = Image.new("RGB", img.size, "white")
+                background.paste(img, mask=img.getchannel("A"))
+                img = background
+            else:
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=85, optimize=True)
+            return out.getvalue()
+    except Exception as exc:
+        raise ValueError("Format non reconnu. Essaie une capture d’écran JPG ou PNG.") from exc
+
+
 def run():
     st.subheader("🎬 Animation 2D — Wan 2.2")
     st.caption("Une image, un mouvement, une vidéo. Aucun découpage manuel.")
-    upload = st.file_uploader("Photo de tête ou personnage entier",
-                              type=["png", "jpg", "jpeg", "webp"], key="wan_img_v2")
-    kind = st.radio("Que contient ton image ?",
-                    ["Personnage entier", "Tête seule"], horizontal=True,
-                    key="wan_kind_v2")
+    st.info("Sur Android : sélectionne une photo dans Fichiers ou Galerie. L’aperçu confirme l’importation.")
+    upload = st.file_uploader(
+        "📷 Choisir une photo (JPG, PNG, WEBP, HEIC si pris en charge)",
+        type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
+        key="wan_img_android_v3",
+    )
+    kind = st.radio("Que contient ton image ?", ["Personnage entier", "Tête seule"],
+                    horizontal=True, key="wan_kind_v3")
     motion = st.text_area("Mouvement",
-                          "The cartoon character dances with natural arm and leg movements. "
-                          "Preserve the original face, clothing and 2D art style.",
-                          key="wan_motion_v2")
+        "The cartoon character dances with natural arm and leg movements. "
+        "Preserve the original face, clothing and 2D art style.", key="wan_motion_v3")
     prepared = None
-    if upload:
-        if upload.size > MAX_IMAGE:
-            st.error("Image trop volumineuse : 8 Mo maximum.")
-        else:
-            raw = upload.getvalue()
+    if upload is not None:
+        try:
+            normalized = prepare_upload(upload)
+            st.success("✅ Photo reçue : " + upload.name)
             if kind == "Tête seule":
-                st.info("Mode expérimental : un corps cartoon simple est dessiné automatiquement. "
-                        "Ce n'est pas une reconstruction IA fidèle et la photo reste visible dans son cadre.")
-                prepared = make_cartoon_body(raw)
-                st.image(prepared, caption="Personnage préparé (aperçu)")
+                st.warning("Corps cartoon expérimental : pas encore de génération IA fidèle du corps.")
+                prepared = make_cartoon_body(normalized)
+                st.image(prepared, caption="Personnage préparé", width=280)
                 st.download_button("⬇️ Enregistrer le personnage", prepared,
-                                   "KarmaClip_personnage.png", "image/png", key="wan_character_dl")
+                    "KarmaClip_personnage.png", "image/png", key="wan_character_dl_v3")
             else:
-                # Convert input to PNG to match Gradio upload metadata.
-                src = ImageOps.exif_transpose(Image.open(io.BytesIO(raw))).convert("RGB")
-                buf = io.BytesIO()
-                src.save(buf, format="PNG")
-                prepared = buf.getvalue()
-                st.image(prepared, caption="Image de référence", width=280)
-    if st.button("🎬 Générer la vidéo avec Wan 2.2", type="primary", key="wan_go_v2"):
+                prepared = normalized
+                st.image(prepared, caption="Photo importée", width=280)
+            st.caption("Image optimisée automatiquement pour limiter les échecs d’envoi.")
+        except ValueError as exc:
+            st.error(str(exc))
+    if st.button("🎬 Générer la vidéo avec Wan 2.2", type="primary", key="wan_go_v3"):
         if not prepared:
             st.warning("Ajoute une image valide.")
         else:
             try:
                 with st.spinner("Génération sur GPU partagé (disponibilité non garantie)…"):
-                    st.session_state["wan_result_v2"] = generate(
+                    st.session_state["wan_result_v3"] = generate(
                         prepared, "character.png", motion.strip())
                 st.success("Vidéo générée.")
             except Exception as exc:
                 st.error("Wan indisponible : " + str(exc))
-    if st.session_state.get("wan_result_v2"):
-        video = st.session_state["wan_result_v2"]
+    if st.session_state.get("wan_result_v3"):
+        video = st.session_state["wan_result_v3"]
         st.video(video)
         st.download_button("⬇️ Télécharger le MP4", video,
-                           "KarmaClip_Wan22.mp4", "video/mp4", key="wan_video_dl_v2")
+            "KarmaClip_Wan22.mp4", "video/mp4", key="wan_video_dl_v3")
     st.link_button("Ouvrir NiftyVid (solution externe)",
                    "https://igorcsis.github.io/nifty-vid/")
-    st.caption("Gratuit sous réserve de disponibilité de la démo publique. "
-               "La génération Wan et la fidélité des mouvements ne sont pas garanties.")
+    st.caption("Gratuit sous réserve de disponibilité de la démo publique.")
