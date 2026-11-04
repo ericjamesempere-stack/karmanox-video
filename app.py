@@ -11,13 +11,13 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='KarmaClip AI V13', page_icon='🎬', layout='wide')
+st.set_page_config(page_title='KarmaClip AI V14.1', page_icon='🎬', layout='wide')
 if "visual_reference_description" not in st.session_state:
     st.session_state.visual_reference_description = ""
 if "visual_reference_input" not in st.session_state:
     st.session_state.visual_reference_input = st.session_state.visual_reference_description
 
-st.title('🎬 KarmaClip AI V13')
+st.title('🎬 KarmaClip AI V14.1')
 st.caption('Paroles + musique → scènes de 5 secondes → vidéos → clip final')
 
 SERVICES = {
@@ -221,54 +221,52 @@ DANCE_STAGES = [
         "They perform a lively side-to-side partner dance with matching footwork",
         "They turn together in a small circle, keeping their balance",
     ]),
-    ("close together, ready for the finale", [
-        "They slow their steps and exchange a delighted look",
-        "The leading character places one supporting arm securely behind the partner's back",
-        "They take a synchronized step to prepare a graceful dip",
-        "The leader gently dips the partner backward, supporting their back and waist; the partner arches back, head tilted backward, one leg raised elegantly",
+    ("dancing together, keeping the rhythm", [
+        "They change direction together without breaking their rhythm",
+        "They exchange a delighted look and add a fresh synchronized step",
+        "They improvise a playful partner turn while keeping their balance",
+        "They finish the phrase with a coordinated step, ready to continue dancing",
     ]),
 ]
 
 
 def story_step(index, total, mood, story_mode, lyric_excerpt):
-    """Return an explicit beginning pose, physical action, and ending pose."""
-    if mood == 'dance' or mood == 'romantic':
-        # Reserve first 20%, next 20%, next 20%, next 30%, final 10% for the five acts.
+    """Build a complete progressive narrative, one distinct physical beat per shot."""
+    if mood in ('dance', 'romantic'):
+        steps = [(stage, action) for stage, (_, actions) in enumerate(DANCE_STAGES)
+                 for action in actions]
+        # For 36 shots, expand the 29 base moves into small variations without
+        # resetting the dancers or repeating the same action verbatim.
         progress = index / max(total - 1, 1)
-        boundaries = [0.2, 0.4, 0.6, 0.9, 1.01]
-        stage = next(i for i, bound in enumerate(boundaries) if progress < bound)
-        lower = [0, 0.2, 0.4, 0.6, 0.9][stage]
-        upper = boundaries[stage]
-        within = max(0, min(0.999, (progress - lower) / (upper - lower)))
-        actions = DANCE_STAGES[stage][1]
-        action_idx = min(len(actions)-1, int(within * len(actions)))
-        # Ensure final shot is the user's requested dip.
-        if index == total - 1:
-            stage = 4
-            action_idx = len(DANCE_STAGES[4][1]) - 1
-        action = DANCE_STAGES[stage][1][action_idx]
-        pose = DANCE_STAGES[stage][0]
-        previous_pose = DANCE_STAGES[max(stage-1,0)][0] if action_idx == 0 and stage else pose
-        end_pose = ('partner supported in a graceful backward dip, head back and one leg raised'
-                    if index == total-1 else pose)
+        slot = min(len(steps) - 1, int(progress * (len(steps) - 1)))
+        stage, action = steps[slot]
+        repeats = sum(1 for k in range(index) if
+                      min(len(steps)-1, int(k / max(total-1, 1) * (len(steps)-1))) == slot)
+        if repeats:
+            action += ("; then they finish the movement with a small rhythmic weight shift"
+                       if repeats % 2 else "; then they add a gentle synchronized half-step")
+        # A concrete end state that the next prompt can inherit, not a vague stage label.
+        end_pose = f"Both dancers have just completed this action: {action}; {DANCE_STAGES[stage][0]}"
+        start_pose = ('the exact positions and body orientation from the reference image'
+                      if index == 0 else 'the final position from the preceding shot')
     else:
         actions = BEATS.get(mood, BEATS['dreamlike'])
-        action_idx = min(len(actions)-1, int(index / max(total,1) * len(actions)))
-        action = actions[action_idx]
-        previous_pose = 'in the same location and body positions as the end of the previous shot'
-        end_pose = 'the completed movement, ready to continue naturally'
-    # The lyrical mode influences expression and timing, NEVER changes who/where the characters are.
+        slot = min(len(actions)-1, int(index / max(total,1) * len(actions)))
+        action = actions[slot]
+        step_number = index - int(slot * total / len(actions))
+        if step_number > 0:
+            action += f'; extend this moment with a distinct natural gesture, variation {step_number + 1}'
+        start_pose = ('the exact positions in the reference image' if index == 0
+                      else 'the final position from the preceding shot')
+        end_pose = f'the character has just finished: {action}'
     if story_mode == 'lyrics' and lyric_excerpt.strip():
         feeling = scene_mood(lyric_excerpt, index, total)
-        cue = {
-            'romantic': 'gentle affectionate expression',
-            'melancholic': 'tender and introspective expression',
-            'dance': 'playful energetic timing',
-            'power': 'strong confident timing',
-            'dreamlike': 'curious expressive reaction',
-        }[feeling]
-        action += f'. Emotional cue from this part of the song: {cue}'
-    return previous_pose, action, end_pose
+        cue = {'romantic': 'gentle affectionate expression',
+               'melancholic': 'tender and introspective expression',
+               'dance': 'playful energetic timing', 'power': 'strong confident timing',
+               'dreamlike': 'curious expressive reaction'}[feeling]
+        action += f'. Emotional timing for this verse: {cue}'
+    return start_pose, action, end_pose
 
 
 def image_guided_prompt(scene, style, reference_description, custom_idea='', mood='dreamlike',
@@ -300,7 +298,7 @@ def chained_prompt(scene, previous, style, identity, mood, total, idea, story_mo
     # A clear continuity instruction for generators; cannot infer true pose from video without video analysis.
     prefix = (f"DIRECT CONTINUATION OF SHOT {previous['index']+1}. "
               f"Starting state: {ending}. Maintain positions, characters, costumes and surroundings. ")
-    return prefix + base
+    return prefix + base.replace("Start: the final position from the preceding shot. ", "")
 
 
 # Creative options share one immutable starting position, inherited from the previous shot.
@@ -388,7 +386,7 @@ def creative_storyboard_with_ai(scenes, lyrics, reference_description, idea, sty
         "VISUAL ACTIONS and evolving character relationships. "
         "Every shot MUST begin in the exact position where the previous shot ended. "
         "Build a clear beginning, gradual approach, physical interaction, multiple distinct "
-        "dance movements, and a final supported backward dip. Do not reset the scene. "
+        "dance movements, and a natural ending appropriate to the story. Do not reset the scene. "
         "Respect all subjects, exact character count, outfits and appearance. "
         "Each shot is about 5 seconds, a single physically achievable action. "
         "Prompts concise (max 42 words), in English, visually specific, different "
@@ -574,7 +572,7 @@ with st.container(border=True):
              key='story_timeline_mode',
              help='Dans les deux modes, les personnages et leurs mouvements se suivent. Le second adapte les expressions et les temps forts aux paroles.')
     st.text_input('🎬 Mouvement final souhaité (facultatif)',
-                  value='Graceful partner dip: one partner leans backward, head back, one leg raised',
+                  value='',
                   key='finale_action')
     st.selectbox("🎭 Ambiance de réalisation", [
         "Automatique selon la chanson", "Danse et humour", "Romantique",
@@ -606,6 +604,7 @@ with st.container(border=True):
                     story_idea=idea, story_mode=timeline_mode
                 )
             if st.session_state.scenes and st.session_state.finale_action.strip():
+                st.session_state.scenes[-1]['scene_idea'] = st.session_state.finale_action.strip()
                 final_scene = st.session_state.scenes[-1]
                 final_scene['prompt'] = image_guided_prompt(
                     final_scene, style, st.session_state.visual_reference_description,
@@ -614,8 +613,11 @@ with st.container(border=True):
                     story_idea=idea, story_mode=timeline_mode
                 )
             for j, item in enumerate(st.session_state.scenes):
-                item['planned_end'] = story_step(j, len(st.session_state.scenes),
-                    selected_mood, timeline_mode, item.get('lyrics', ''))[2]
+                item['planned_end'] = (
+                    'the completed final movement: ' + st.session_state.finale_action.strip()
+                    if j == len(st.session_state.scenes)-1 and st.session_state.finale_action.strip()
+                    else story_step(j, len(st.session_state.scenes),
+                        selected_mood, timeline_mode, item.get('lyrics', ''))[2])
             for j in range(1, len(st.session_state.scenes)):
                 item = st.session_state.scenes[j]
                 item['prompt'] = chained_prompt(item, st.session_state.scenes[j-1], style,
@@ -660,6 +662,16 @@ with st.container(border=True):
 if st.session_state.scenes:
     scenes = st.session_state.scenes
     st.subheader(f'3. Tes scènes ({len(scenes)})')
+    st.success(f'Les {len(scenes)} prompts sont déjà écrits dans l’ordre, avec une progression complète du premier au dernier plan.')
+    all_prompts = '\n\n'.join(
+        f"SCÈNE {j+1:02d} — {item['start']:.0f}–{item['end']:.0f} s\n{item['prompt']}"
+        for j, item in enumerate(scenes))
+    st.download_button('📄 Télécharger TOUS les prompts dans l’ordre',
+                       all_prompts.encode('utf-8'), file_name='karmaclip_prompts_complets.txt',
+                       mime='text/plain', use_container_width=True)
+    with st.expander('📋 Voir les prompts complets, du premier au dernier'):
+        st.code(all_prompts, language=None)
+
     st.caption('Répartition approximative des paroles : la synchronisation mot à mot nécessite des paroles horodatées.')
     st.info("Chaque prompt raconte une action visible. Les paroles orientent l'émotion, pas le texte du prompt. Tu peux remplacer chaque action par ton idée.")
 
