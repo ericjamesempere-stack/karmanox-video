@@ -146,3 +146,7 @@ if result:
     st.link_button('🎥 Ouvrir LoreMotion','https://loremotion.com/',use_container_width=True)
 st.divider()
 st.caption('En mode animation, importe l’image originale dans LoreMotion en image-vers-vidéo. En création, utilise texte-vers-vidéo ou une image facultative. LoreMotion est ouvert manuellement. Les prompts favorisent la fidélité mais ne garantissent pas le rendu du moteur vidéo. La musique n’est pas transcrite ni analysée : seule sa durée est lue.')
+st.divider()
+with st.expander('🎨 Atelier animation 2D (nouveau)', expanded=False):
+    from studio_2d import run
+    run()
