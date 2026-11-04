@@ -1,4 +1,5 @@
-import os, io, re, json, math, wave, base64, urllib.request, urllib.error
+import os, io, re, json, math, wave, base64
+import requests
 import streamlit as st
 from mutagen import File as AudioFile
 
@@ -21,16 +22,38 @@ def audio_length(file):
     except Exception: return None
 
 def chat_call(provider, key, model, user_content):
-    endpoint={'Groq':'https://api.groq.com/openai/v1/chat/completions','OpenRouter':'https://openrouter.ai/api/v1/chat/completions'}[provider]
-    payload={'model':model,'messages':[{'role':'system','content':SYSTEM},{'role':'user','content':user_content}], 'temperature':0.75,'max_tokens':8192}
-    headers={'Content-Type':'application/json','Authorization':'Bearer '+key}
-    if provider=='OpenRouter':headers['HTTP-Referer']='https://render.com'
-    request=urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method='POST')
+    endpoint = {
+        'Groq': 'https://api.groq.com/openai/v1/chat/completions',
+        'OpenRouter': 'https://openrouter.ai/api/v1/chat/completions',
+    }[provider]
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': SYSTEM},
+            {'role': 'user', 'content': user_content},
+        ],
+        'temperature': 0.75,
+        'max_tokens': 8192,
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + key,
+        'User-Agent': 'KarmaClipAgent/1.1 (+https://karmanox-video.onrender.com)',
+        'Accept': 'application/json',
+    }
+    if provider == 'OpenRouter':
+        headers['HTTP-Referer'] = 'https://karmanox-video.onrender.com'
+        headers['X-Title'] = 'KarmaClip Agent'
     try:
-        with urllib.request.urlopen(request,timeout=110) as response: result=json.load(response)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f'{provider} HTTP {e.code}: {e.read(350).decode(errors="replace")}')
-    return result['choices'][0]['message']['content']
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=110)
+        if not response.ok:
+            # Avoid leaking API keys or full request payloads into the UI.
+            body = response.text[:280].replace(key, '[REDACTED]')
+            raise RuntimeError(f'{provider} HTTP {response.status_code}: {body}')
+        result = response.json()
+        return result['choices'][0]['message']['content']
+    except requests.RequestException as exc:
+        raise RuntimeError(f'{provider} : erreur réseau ({type(exc).__name__})') from exc
 
 SYSTEM='''Tu es un réalisateur de clips vidéo expérimenté. Réponds uniquement avec un objet JSON valide, sans Markdown, de forme:
 {"title":"titre","synopsis":"histoire originale avec début, progression et fin","direction":"story|dance|variety|performance|abstract","style":"style visuel","proposals":[{"title":"...","pitch":"..."},{"title":"...","pitch":"..."},{"title":"...","pitch":"..."}],"scenes":[{"action":"action narrative concrète en français","prompt":"prompt vidéo détaillé en anglais"}]}
@@ -56,11 +79,10 @@ def plan(idea, photo, music, duration, count, mode, direction, style, ratio):
         mime={'png':'image/png','webp':'image/webp'}.get(ext,'image/jpeg')
         content.append({'type':'image_url','image_url':{'url':'data:'+mime+';base64,'+base64.b64encode(photo.getvalue()).decode()}})
     errors=[]
-    # OpenRouter fallback for text only: its free router may not support vision.
+    # OpenRouter can be tried with images; the selected free route may not support vision.
     providers=[]
     if groq:providers.append(('Groq',groq,secret('GROQ_VISION_MODEL') if photo else secret('GROQ_TEXT_MODEL')))
-    if router and not photo:providers.append(('OpenRouter',router,secret('OPENROUTER_MODEL') or 'openrouter/free'))
-    if photo and not groq:raise RuntimeError('Pour analyser une image, configure une clé Groq et un modèle vision compatible. OpenRouter est réservé au texte dans cette version.')
+    if router:providers.append(('OpenRouter',router,secret('OPENROUTER_VISION_MODEL') or 'openrouter/free' if photo else secret('OPENROUTER_MODEL') or 'openrouter/free'))
     for provider,key,model in providers:
         model=model or ('meta-llama/llama-4-scout-17b-16e-instruct' if photo else 'llama-3.3-70b-versatile')
         try:
