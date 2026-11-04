@@ -20,7 +20,7 @@ def audio_length(file):
         return float(sound.info.length) if sound and sound.info else None
     except Exception: return None
 
-SYSTEM='''You are a music-video director writing short, actionable prompts for an image-to-video generator (LoreMotion). Return ONLY valid JSON with keys: title, synopsis, direction, style, visual_identity, proposals (array of 3 objects with title,pitch), scenes (array of EXACTLY requested scene count; each object has action in French and prompt in English). Make a coherent story with beginning, development and ending. For each prompt use 1 primary visible action, who moves, direction of motion, simple camera instruction, and continuity. Keep each English prompt 35-75 words. No subtitles or on-screen text. No abstract metaphor or conflicting actions. If the user supplies an image, identify ONLY visible attributes and original medium/style. Preserve original 2D drawing, manga, caricature, 3D render, photo, or mixed-media medium EXACTLY. NEVER humanize a drawn figure or turn a photo into an illustration. Maintain same characters, facial features, body shape, clothing, colors, line work, textures, and proportions across all scenes. Do not invent unseen visual attributes. Do not use 'photorealistic', 'cinematic realism', 'real human', 'realistic anatomy', or 'live-action' unless the input image is demonstrably photographic. If image content cannot be seen, do not claim to have analyzed it. Only music file name and duration are provided, not musical content. Prompt must be usable with the original reference image attached in LoreMotion; never promise exact adherence by the video generator.'''
+SYSTEM='''You are a music-video director writing short, actionable prompts for an image-to-video generator (LoreMotion). Return ONLY valid JSON with keys: title, synopsis, direction, style, visual_identity, proposals (array of 3 objects with title,pitch), scenes (array of EXACTLY requested scene count; each object has action in French and prompt in English). Make a coherent story with beginning, development and ending. For each prompt use 1 primary visible action, who moves, direction of motion, simple camera instruction, and continuity. Keep each English prompt 35-75 words. No subtitles or on-screen text. No abstract metaphor or conflicting actions. If task_mode is ANIMATE_EXISTING_IMAGE: the uploaded image is the literal first frame, NOT a loose inspiration. Describe ONLY animation of the depicted subjects, with one feasible movement per scene and minimal camera movement. Do not invent new characters or change their appearance. If task_mode is CREATE_NEW_VIDEO: invent an original film from the concept; an optional image may inspire the composition but must not be assumed to be the first frame. If the user supplies an image in animation mode, identify ONLY visible attributes and original medium/style. Preserve original 2D drawing, manga, caricature, 3D render, photo, or mixed-media medium EXACTLY. NEVER humanize a drawn figure or turn a photo into an illustration. Maintain same characters, facial features, body shape, clothing, colors, line work, textures, and proportions across all scenes. Do not invent unseen visual attributes. Do not use 'photorealistic', 'cinematic realism', 'real human', 'realistic anatomy', or 'live-action' unless the input image is demonstrably photographic. If image content cannot be seen, do not claim to have analyzed it. Only music file name and duration are provided, not musical content. Prompt must be usable with the original reference image attached in LoreMotion; never promise exact adherence by the video generator.'''
 
 def chat_call(provider,key,model,content,sys=SYSTEM):
     endpoint={'Groq':'https://api.groq.com/openai/v1/chat/completions','OpenRouter':'https://openrouter.ai/api/v1/chat/completions'}[provider]
@@ -55,10 +55,11 @@ def build_content(data,photo):
         content.append({'type':'image_url','image_url':{'url':'data:'+mime+';base64,'+base64.b64encode(photo.getvalue()).decode()}})
     return content
 
-def plan(idea,photo,music,duration,count,mode,direction,style,ratio):
+def plan(idea,photo,music,duration,count,mode,direction,style,ratio,task_mode):
     groq=secret('GROQ_API_KEY');router=secret('OPENROUTER_API_KEY')
     if not groq and not router:raise RuntimeError('Ajoute GROQ_API_KEY ou OPENROUTER_API_KEY dans Render > Environment.')
-    data={'idee_ou_paroles':idea or 'Inventer une histoire originale avec début, progression et fin', 'nombre_de_scenes':count,'duree_totale_secondes':duration,'duree_par_scene':round(duration/count,2),'mode':mode,'direction':direction if mode=='Manuel' else 'auto','style':style if mode=='Manuel' else 'respecter image si fournie, sinon auto','ratio':ratio,'musique':{'nom':music.name,'duree':audio_length(music)} if music else None,'image_reference':bool(photo),'priorite':'conserver strictement le medium et le style de l’image; une seule action principale par scène; prompts LoreMotion courts et concrets'}
+    if task_mode=='Animer une image' and not photo:raise ValueError('Ajoute une image pour le mode animation.')
+    data={'task_mode':'ANIMATE_EXISTING_IMAGE' if task_mode=='Animer une image' else 'CREATE_NEW_VIDEO','idee_ou_paroles':idea or 'Inventer une histoire originale avec début, progression et fin', 'nombre_de_scenes':count,'duree_totale_secondes':duration,'duree_par_scene':round(duration/count,2),'mode':mode,'direction':direction if mode=='Manuel' else 'auto','style':style if mode=='Manuel' else 'respecter image si fournie, sinon auto','ratio':ratio,'musique':{'nom':music.name,'duree':audio_length(music)} if music else None,'image_reference':bool(photo),'priorite':('Animer uniquement les sujets de l’image importée; image comme première frame; identité, style et décor inchangés; une seule action physique simple par scène' if task_mode=='Animer une image' else 'Créer une nouvelle vidéo originale; image facultative comme inspiration; une seule action principale par scène')}
     content=build_content(data,photo)
     providers=[]
     if photo:
@@ -86,12 +87,19 @@ def plan(idea,photo,music,duration,count,mode,direction,style,ratio):
     raise RuntimeError('Échec des fournisseurs : '+' | '.join(errors))
 
 if 'result' not in st.session_state:st.session_state.result=None
-st.subheader('1 · Ton point de départ')
+st.subheader('1 · Choisis ton objectif')
+choice=st.radio('Création vidéo',['Automatique','Créer une vidéo','Animer une image'],horizontal=False,help='Automatique : anime si une image est fournie, sinon crée une nouvelle vidéo.')
+st.subheader('2 · Ton point de départ')
 idea=st.text_area('Idée, paroles ou description (facultatif)',placeholder='Une histoire, une danse, un personnage…',height=120)
 photo=st.file_uploader('Image de référence (facultative)',type=['png','jpg','jpeg','webp'])
 if photo:
     st.image(photo,width=230)
-    st.info('🔒 Style original verrouillé dans les prompts : un dessin reste un dessin, une photo reste une photo. Joins aussi cette image à LoreMotion.')
+task_mode=('Animer une image' if photo else 'Créer une vidéo') if choice=='Automatique' else choice
+st.info('🎬 Mode retenu : '+task_mode)
+if task_mode=='Animer une image':
+    st.caption('🔒 Image = première image de la vidéo. Conserver le dessin ou la photo, ne décrire que le mouvement. Joindre la même image sur LoreMotion en mode image-vers-vidéo.')
+else:
+    st.caption('✨ Création originale : l’IA invente une vidéo. L’image éventuelle sert d’inspiration, sans obligation de reprendre exactement son personnage.')
 music=st.file_uploader('Musique (facultative)',type=['wav','mp3'])
 length=audio_length(music)
 if length:st.caption(f'Durée musicale détectée : {length:.1f} secondes')
@@ -101,7 +109,7 @@ per=st.selectbox('Durée indicative par scène',[3.5,5.0,6.0,8.0,10.0],index=1)
 custom=st.number_input('Durée personnalisée en secondes',min_value=3.0,max_value=900.0,value=30.0)
 duration=float(length if source=='Durée de la musique' and length else custom if source=='Personnalisée' else count*per)
 st.caption(f'{int(count)} scènes · {duration:.1f} secondes · environ {duration/count:.1f} s par scène')
-st.subheader('2 · Qui dirige ?')
+st.subheader('3 · Qui dirige ?')
 mode=st.radio('Mode',['Automatique','Manuel'],horizontal=True)
 direction='';style='';ratio='9:16'
 if mode=='Manuel':
@@ -109,16 +117,18 @@ if mode=='Manuel':
     style=st.selectbox('Style (si aucune image de référence)',['Libre','Cinéma photoréaliste','Animation 3D','Manga','Vintage','Surréaliste','Documentaire'])
     ratio=st.selectbox('Format',['9:16','16:9','1:1'])
 if st.button('🧠 L’agent crée toute mon histoire',type='primary',use_container_width=True):
-    if not (idea.strip() or photo or music):st.warning('Ajoute au moins une idée, une image ou une musique.')
+    if task_mode=='Animer une image' and not photo:st.warning('Ajoute une image pour pouvoir l’animer.')
+    elif not (idea.strip() or photo or music):st.warning('Ajoute au moins une idée, une image ou une musique.')
     else:
         try:
             with st.spinner('Le réalisateur IA prépare les séquences LoreMotion…'):
-                st.session_state.result=plan(idea.strip(),photo,music,duration,int(count),mode,direction,style,ratio)
+                st.session_state.result=plan(idea.strip(),photo,music,duration,int(count),mode,direction,style,ratio,task_mode)
             st.success('Storyboard IA créé.')
         except Exception as e:st.error(str(e))
 result=st.session_state.result
 if result:
-    st.subheader('3 · Le projet de l’agent')
+    st.subheader('4 · Le projet de l’agent')
+    st.caption('Mode : '+task_mode)
     st.markdown('**'+str(result.get('title','Mon clip'))+'**')
     st.write(result.get('synopsis',''))
     if result.get('visual_identity'):st.caption('🔒 Identité visuelle : '+str(result['visual_identity']))
@@ -135,4 +145,4 @@ if result:
     st.download_button('⬇️ Télécharger le storyboard JSON',json.dumps(result,ensure_ascii=False,indent=2),'KarmaClip_storyboard.json',use_container_width=True)
     st.link_button('🎥 Ouvrir LoreMotion','https://loremotion.com/',use_container_width=True)
 st.divider()
-st.caption('LoreMotion est ouvert manuellement. Les prompts favorisent la fidélité mais ne garantissent pas le rendu du moteur vidéo. La musique n’est pas transcrite ni analysée : seule sa durée est lue.')
+st.caption('En mode animation, importe l’image originale dans LoreMotion en image-vers-vidéo. En création, utilise texte-vers-vidéo ou une image facultative. LoreMotion est ouvert manuellement. Les prompts favorisent la fidélité mais ne garantissent pas le rendu du moteur vidéo. La musique n’est pas transcrite ni analysée : seule sa durée est lue.')
