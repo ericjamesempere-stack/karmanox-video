@@ -6,6 +6,13 @@ import io
 import re
 import json
 import zipfile
+import hashlib
+import subprocess
+import tempfile
+from pathlib import Path
+import subprocess
+import tempfile
+from pathlib import Path
 import streamlit as st
 from PIL import Image, ImageOps
 
@@ -111,8 +118,21 @@ if music:
     st.caption(f'Musique reçue : {music.name} ({music.size / (1024*1024):.1f} Mo). Elle sert de référence, pas de synchronisation automatique dans cette version.')
 
 st.subheader('3 · Génération')
-engine = st.radio('Moteur', ['LoreMotion (prioritaire)', 'Wan 2.2 (essai direct)'], horizontal=False)
-count = st.slider('Nombre de scènes', 1, 30, 1)
+engine = st.radio('Moteur', ['Wan 2.2 (direct, photo requise)', 'LoreMotion (externe : texte ou photo)', 'LTX (externe : texte ou photo)'], horizontal=False)
+input_mode = st.radio('Entrée vidéo', ['Photo + texte', 'Texte seul'], horizontal=True)
+if engine.startswith('Wan') and input_mode == 'Texte seul':
+    st.warning('WAN direct nécessite une image de départ. Choisis Photo + texte, ou un moteur externe compatible texte-vers-vidéo.')
+continuity_mode = st.selectbox('Image de départ des scènes suivantes', ['Dernière image de la vidéo précédente', 'Photo initiale', 'Image personnalisée par scène'], index=0)
+custom_frames = {}
+if continuity_mode == 'Image personnalisée par scène':
+    st.caption('Pour une scène sans image spécifique, KarmaClip reprend la dernière image disponible.')
+    for frame_index in range(2, min(301, int(st.session_state.get('kc_custom_count', 5)) + 1)):
+        with st.expander(f'Image facultative — scène {frame_index}'):
+            custom_upload = st.file_uploader('Remplacer la photo de départ', type=['png','jpg','jpeg','webp'], key=f'kc_custom_frame_{frame_index}')
+            if custom_upload:
+                custom_frames[frame_index] = normalize(custom_upload)
+count = st.number_input('Nombre de scènes', min_value=1, max_value=300, value=5, step=1, key='kc_custom_count')
+st.caption('WAN : génération séquentielle. Les démonstrations gratuites peuvent interrompre une série ; chaque clip réussi est conservé dans la session.')
 st.caption('Pour une image de référence, décris les personnes réellement présentes. Le programme ne les détecte pas automatiquement.')
 people = st.selectbox('Nombre de personnes sur la photo', [2, 1, 3, 4], index=0)
 action = st.selectbox('Mouvement précis de la scène 1',
@@ -130,32 +150,116 @@ if st.session_state.kc_prompts:
             st.caption('Utilise ce prompt avec la même image de référence en mode image-vers-vidéo.')
     st.download_button('⬇️ Télécharger les prompts', '\n\n'.join(st.session_state.kc_prompts), 'KarmaClip_prompts.txt', 'text/plain', use_container_width=True)
 
-if engine.startswith('LoreMotion'):
-    st.info('LoreMotion est prioritaire. Son automatisation nécessite une session navigateur authentifiée côté serveur ; elle n’est pas installée ici. Aucun faux bouton « Générer » : prépare le prompt puis ouvre LoreMotion.')
-    st.link_button('🎥 Ouvrir LoreMotion', 'https://loremotion.com/', use_container_width=True)
+if not engine.startswith('Wan'):
+    st.info('Mode externe : prépare les prompts ici. La génération automatique et la récupération des vidéos ne sont pas connectées pour ce moteur. Texte seul possible si le modèle choisi sur le site le prend en charge.')
+    if engine.startswith('LoreMotion'):
+        st.link_button('🎥 Ouvrir LoreMotion', 'https://loremotion.com/', use_container_width=True)
+    else:
+        st.link_button('🎥 Ouvrir LTX Studio', 'https://ltx.studio/', use_container_width=True)
     if photo_bytes:
         st.download_button('⬇️ Photo prête pour LoreMotion', photo_bytes, 'KarmaClip_image.png', 'image/png', use_container_width=True)
 else:
-    st.caption('Wan utilise la démonstration GPU publique du module wan_nifty.py. Elle peut être indisponible.')
-    if st.button('🎬 Lancer Wan 2.2', use_container_width=True):
-        if not photo_bytes:
-            st.warning('Ajoute une photo.')
-        elif not idea.strip():
-            st.warning('Ajoute un mouvement.')
+    st.caption('WAN 2.2 : génère les scènes dans l’ordre, en utilisant la dernière image de la vidéo précédente. Aucune garantie de quota sur le GPU public.')
+    if 'kc_chain_clips' not in st.session_state:
+        st.session_state.kc_chain_clips = []
+    if 'kc_chain_frames' not in st.session_state:
+        st.session_state.kc_chain_frames = []
+    def kc_chain_last_frame(video_bytes):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'clip.mp4'
+            output = Path(folder) / 'frame.png'
+            source.write_bytes(video_bytes)
+            probe = subprocess.run(['ffprobe','-v','error','-show_entries','format=duration',
+                                    '-of','default=noprint_wrappers=1:nokey=1',str(source)],
+                                   capture_output=True,text=True,timeout=20)
+            if probe.returncode:
+                raise RuntimeError('ffprobe : ' + probe.stderr[-300:])
+            duration = float(probe.stdout.strip())
+            position = max(0, duration - .12)
+            result = subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y',
+                                     '-ss',str(position),'-i',str(source),'-frames:v','1',str(output)],
+                                    capture_output=True,text=True,timeout=45)
+            if result.returncode or not output.exists():
+                raise RuntimeError('Extraction de la dernière image impossible : ' + result.stderr[-300:])
+            return output.read_bytes()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        start_chain = st.button('🎬 Générer les scènes WAN',use_container_width=True)
+    with col_b:
+        reset_chain = st.button('🧹 Recommencer la série',use_container_width=True)
+    if reset_chain:
+        st.session_state.kc_chain_clips = []
+        st.session_state.kc_chain_frames = []
+        st.session_state.pop('kc_chain_config', None)
+        st.session_state.pop('kc_chain_montage', None)
+        st.rerun()
+    if start_chain:
+        if not photo_bytes or not idea.strip() or input_mode == 'Texte seul':
+            st.warning('WAN direct exige une image de départ et une description. Choisis Photo + texte.')
         else:
+            from wan_nifty import generate
+            clips = st.session_state.kc_chain_clips
+            frames = st.session_state.kc_chain_frames
+            # Preserve results only while settings and reference image are unchanged.
+            chain_config = (hashlib.sha256(photo_bytes).hexdigest(), idea, int(count), continuity_mode, people, action, locked, tuple(sorted((k,hashlib.sha256(v).hexdigest()) for k,v in custom_frames.items())))
+            if clips and st.session_state.get('kc_chain_config') != chain_config:
+                st.warning('Les réglages ont changé : recommence la série pour éviter de mélanger deux projets.')
+                st.stop()
+            st.session_state.kc_chain_config = chain_config
+            if not clips:
+                frames[:] = [photo_bytes]
+            prompts = scenes_from_text(idea, int(count), True, people, action, locked)
+            progress = st.progress(min(len(clips)/int(count),1.0))
+            for index in range(len(clips), int(count)):
+                try:
+                    with st.spinner(f'WAN : scène {index+1}/{count}…'):
+                        source_image = (photo_bytes if continuity_mode == 'Photo initiale' else custom_frames.get(index+1, frames[-1]))
+                        video = generate(source_image,f'karmaclip_scene_{index+1}.png',prompts[index])
+                        if not video or len(video) < 1024:
+                            raise RuntimeError('Le moteur n’a pas retourné de vidéo valide')
+                        # Extract before recording success so resume never skips a missing frame.
+                        next_frame = kc_chain_last_frame(video)
+                        clips.append(video)
+                        frames.append(next_frame)
+                    progress.progress((index+1)/int(count))
+                except Exception as exc:
+                    st.error(f'Scène {index+1} interrompue : {exc}. Les {len(clips)} clips réussis sont conservés ; relance pour reprendre.')
+                    break
+            if len(clips) >= int(count):
+                st.success(f'{count} scènes générées. Tu peux les prévisualiser et les assembler.')
+    clips = st.session_state.kc_chain_clips
+    if clips:
+        st.write(f'**{len(clips)}/{count} scènes disponibles**')
+        for i, video in enumerate(clips):
+            with st.expander(f'Scène WAN {i+1}',expanded=(i==len(clips)-1)):
+                st.video(video)
+                st.download_button('⬇️ Télécharger la scène',video,
+                                   file_name=f'KarmaClip_WAN_{i+1:03d}.mp4',mime='video/mp4',key=f'kc_chain_dl_{i}')
+        if st.button('🎞️ Assembler les scènes WAN',use_container_width=True):
             try:
-                from wan_nifty import generate
-                with st.spinner('Génération Wan en cours…'):
-                    video = generate(photo_bytes, 'karmaclip.png', scenes_from_text(idea, 1, True, people, action, locked)[0])
-                if not video or len(video) < 1024:
-                    raise RuntimeError('Aucun fichier vidéo valide reçu.')
-                st.session_state.kc_video = video
-                st.success('Vidéo reçue !')
+                with tempfile.TemporaryDirectory() as folder:
+                    root=Path(folder)
+                    listing=[]
+                    for i,clip in enumerate(clips):
+                        target=root/f'clip_{i:03d}.mp4'
+                        target.write_bytes(clip)
+                        listing.append("file '"+str(target)+"'")
+                    playlist=root/'concat.txt'
+                    playlist.write_text('\n'.join(listing),encoding='utf-8')
+                    output=root/'montage.mp4'
+                    cmd=['ffmpeg','-hide_banner','-loglevel','error','-y','-f','concat','-safe','0',
+                         '-i',str(playlist),'-an','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p',
+                         '-movflags','+faststart',str(output)]
+                    result=subprocess.run(cmd,capture_output=True,text=True,timeout=240)
+                    if result.returncode or not output.exists():
+                        raise RuntimeError(result.stderr[-600:])
+                    st.session_state.kc_chain_montage=output.read_bytes()
             except Exception as exc:
-                st.error('Wan indisponible ou génération échouée : ' + str(exc))
-    if st.session_state.get('kc_video'):
-        st.video(st.session_state.kc_video)
-        st.download_button('⬇️ Télécharger le MP4', st.session_state.kc_video, 'KarmaClip.mp4', 'video/mp4', use_container_width=True)
+                st.error('Montage impossible : '+str(exc))
+        if st.session_state.get('kc_chain_montage'):
+            st.video(st.session_state.kc_chain_montage)
+            st.download_button('⬇️ Télécharger le montage WAN',st.session_state.kc_chain_montage,
+                               'KarmaClip_WAN_montage.mp4','video/mp4',use_container_width=True)
 
 st.divider()
 st.caption('Limites : pas de génération automatique LoreMotion, pas de création IA de corps depuis une tête, pas de montage musical automatique. Ces fonctions nécessitent des services de calcul et une intégration vérifiée.')
