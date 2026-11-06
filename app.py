@@ -289,6 +289,48 @@ def kc_translate_scenes(api_key, model, scenes, direction, style):
     return result
 
 
+
+def kc_creative_proposal(api_key, model, scene, project, rejected):
+    """Generate one genuinely new French shot proposal; no video generation."""
+    if not api_key:
+        raise ValueError('Ajoute une clé OpenRouter dans les réglages IA pour obtenir de nouvelles idées.')
+    context = {
+        'title':project.get('title',''), 'lyrics':project.get('lyrics','')[:3500],
+        'style':project.get('style',''), 'user_direction':project.get('user_direction',''),
+        'image_observations':project.get('image_observations',''),
+        'music_interpretation':project.get('music_interpretation',''),
+        'characters':project.get('characters',0),
+        'scene_number':scene['id'], 'scene_start':scene['start'], 'scene_end':scene['end'],
+        'previous_scene': next((x.get('action','') for x in project['scenes'] if x['id']==scene['id']-1),''),
+        'next_scene': next((x.get('action','') for x in project['scenes'] if x['id']==scene['id']+1),''),
+        'rejected_ideas':rejected[-12:]
+    }
+    instruction = ('You are an imaginative but physically realistic music-video director. '
+        'Propose ONE original, surprising, filmable 5-second shot in FRENCH. '
+        'The user explicitly requested creative invention for this scene, but preserve '
+        'all explicit user constraints and the existing characters, motorcycles and setting. '
+        'Exactly ONE clear physical action, coherent bodies and objects, no sudden teleportation, '
+        'no unexplained standing up, no clones, no extra people. '
+        'Differentiate substantially from rejected ideas. Do not merely paraphrase them. '
+        'No generic mood-only suggestions. Return ONLY JSON with nonempty French strings '
+        '"action", "camera", "continuity". Context: '+json.dumps(context,ensure_ascii=False))
+    resp=requests.post('https://openrouter.ai/api/v1/chat/completions',
+        headers={'Authorization':'Bearer '+api_key,'Content-Type':'application/json'},
+        json={'model':model,'messages':[{'role':'user','content':instruction}],
+              'temperature':0.95},timeout=90)
+    if not resp.ok:
+        raise RuntimeError(f'Proposition IA indisponible ({resp.status_code}): {resp.text[:220]}')
+    raw=resp.json()['choices'][0]['message']['content']
+    if isinstance(raw,list):
+        raw=''.join(x.get('text','') for x in raw if isinstance(x,dict))
+    parsed=json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(),flags=re.I))
+    if not isinstance(parsed,dict) or not all(isinstance(parsed.get(k),str) and parsed[k].strip() for k in ('action','camera','continuity')):
+        raise ValueError('La proposition IA est incomplète. Réessaie.')
+    if parsed['action'].strip().casefold() in {v.strip().casefold() for v in rejected}:
+        raise ValueError('Cette idée a déjà été proposée. Clique à nouveau sur Autre idée.')
+    return {k:parsed[k].strip() for k in ('action','camera','continuity')}
+
+
 st.divider()
 st.header('🎬 KarmaClip Agent · Réalisateur IA')
 st.caption('Storyboard → validation → séquences → montage. La génération LoreMotion reste manuelle tant que son pilotage n’est pas connecté.')
@@ -422,8 +464,42 @@ if project:
             st.error('Traduction impossible : '+str(err))
     if project.get('approved'):
         st.caption('Toute modification des scènes après validation nécessite une nouvelle validation.')
+    st.caption('Mode fidèle : tu écris les actions. Mode Inspiration IA : tu peux demander autant de propositions que nécessaire (selon les quotas du modèle), sans lancer de vidéo.')
     for i, scene in enumerate(project['scenes']):
         with st.expander(f"Scène {scene['id']:02d} · {scene['start']:.1f}–{scene['end']:.1f}s · {scene['status']}", expanded=(i==0)):
+            mode_key=f'kc_creative_mode_{i}_{project["title"]}'
+            mode=st.radio('Méthode de création', ['Mes instructions (fidèle)', 'Inspiration IA (propositions)'],
+                          horizontal=True, key=mode_key)
+            proposal_key=f'kc_creative_proposal_{i}_{project["title"]}'
+            rejected_key=f'kc_creative_rejected_{i}_{project["title"]}'
+            if mode.startswith('Inspiration'):
+                st.caption('Une proposition française à la fois. Rien ne remplace ta scène sans ton accord.')
+                if st.button('✨ Proposer une idée' if not st.session_state.get(proposal_key) else '🔄 Autre idée',
+                             key=f'kc_creative_next_{i}_{project["title"]}'):
+                    if st.session_state.get(proposal_key):
+                        st.session_state.setdefault(rejected_key,[]).append(st.session_state[proposal_key]['action'])
+                    try:
+                        with st.spinner('Le réalisateur imagine une autre scène…'):
+                            st.session_state[proposal_key]=kc_creative_proposal(
+                                kc_key,kc_model,scene,project,st.session_state.get(rejected_key,[]))
+                    except Exception as err:
+                        st.error(str(err))
+                proposed=st.session_state.get(proposal_key)
+                if proposed:
+                    st.markdown('**Proposition en français**')
+                    st.write('Action : '+proposed['action'])
+                    st.write('Caméra : '+proposed['camera'])
+                    st.write('Continuité : '+proposed['continuity'])
+                    if st.button('✅ J’aime cette idée — intégrer à la scène', key=f'kc_creative_accept_{i}_{project["title"]}'):
+                        for field in ('action','camera','continuity'):
+                            scene[field]=proposed[field]
+                            st.session_state[f'agent_{field}_{i}_{project["title"]}']=proposed[field]
+                        scene.pop('english',None)
+                        scene.pop('translated_from',None)
+                        project['approved']=False
+                        st.session_state.pop(proposal_key,None)
+                        st.success('Idée intégrée. Tu peux la modifier, puis traduire en anglais et valider.')
+                        st.rerun()
             scene['action'] = st.text_area('Action / intention', scene['action'], key=f"agent_action_{i}_{project['title']}")
             scene['camera'] = st.text_input('Caméra', scene.get('camera','Caméra stable'), key=f"agent_camera_{i}_{project['title']}")
             scene['continuity'] = st.text_input('Continuité', scene.get('continuity','Identités et décor constants'), key=f"agent_continuity_{i}_{project['title']}")
