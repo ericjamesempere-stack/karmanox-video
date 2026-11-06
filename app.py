@@ -40,58 +40,57 @@ def normalize(upload):
         return buf.getvalue()
 
 
+def kc_unified_prompt(action_en, camera_en='', continuity_en='', direction_en='', style_en='', people=2, duration=5, reference=True):
+    """One shared, action-first prompt builder for both KarmaClip workflows.
+
+    Never inserts a new action. The user action remains the primary instruction.
+    """
+    action_en = (action_en or '').strip()
+    camera_en = (camera_en or '').strip()
+    continuity_en = (continuity_en or '').strip()
+    direction_en = (direction_en or '').strip()
+    style_en = (style_en or '').strip()
+    if not action_en:
+        return ''
+    motorcycle = bool(re.search(r'\b(motorcycl|motorbike|motorcycle|motard|moto|rider|ride|roul)\w*', action_en, re.I))
+    sections = [
+        f'IMAGE-TO-VIDEO, {duration:g} seconds, vertical 9:16.',
+        f'PRIMARY ACTION (MANDATORY, DO NOT SUBSTITUTE): {action_en}',
+    ]
+    if motorcycle and re.search(r'\b(ride|riding|roul|driv|moving|forward)\w*', action_en, re.I):
+        sections.append('RIDING PHYSICS: Riders stay seated on their own motorcycles throughout the shot, hands on handlebars, feet on footpegs. The motorcycles travel forward with rotating wheels; riders and motorcycles move together. No standing, dismounting, intersecting legs or overlapping motorcycles. Keep riders’ faces visible whenever possible without changing their original helmets or visors.')
+    if camera_en:
+        sections.append(f'CAMERA (FOLLOW USER INSTRUCTIONS): {camera_en}')
+    if direction_en:
+        sections.append(f'ADDITIONAL USER REQUIREMENTS: {direction_en}')
+    if continuity_en:
+        sections.append(f'CONTINUITY: {continuity_en}')
+    if style_en:
+        sections.append(f'VISUAL STYLE: {style_en}')
+    if reference:
+        sections.append('The supplied image is the literal first frame. Preserve the existing people, faces, outfits, vehicles, objects and environment. Do not invent new people or objects. If the requested starting pose is impossible from the reference, flag that a new starting image is needed instead of inventing a transition.')
+    if people:
+        sections.append(f'Keep the {people} original recurring characters consistent; never duplicate a person.')
+    sections.append('One physically coherent continuous shot. No morphing, teleportation, limb intersections, sudden pose changes or unintended camera cuts. Do not add actions not requested by the user.')
+    return '\n\n'.join(sections)
+
+
 def scenes_from_text(text, count, identity, people=2, action='Libre', locked=True):
-    """Prompts de continuité explicites, sans prétendre analyser l'image."""
+    """Same shared prompt builder used by the storyboard. Input should be English."""
     lines = [v.strip() for v in re.split(r'\n+|(?<=[.!?])\s+', text) if v.strip()]
     if not lines:
-        lines = ['Subtle natural movement, keeping the original composition.']
-    n = {1: 'exactly ONE original person', 2: 'exactly TWO original people',
-         3: 'exactly THREE original people'}.get(people, 'exactly the original people')
-    common = (
-        'IMAGE-TO-VIDEO. The uploaded reference image is the literal FIRST FRAME, '
-        'not a visual inspiration. Animate the SAME existing subjects, never generate replacement subjects. '
-        f'There must be {n} visible throughout, except when an original person naturally exits the frame. '
-        'Each person has one persistent physical body and one persistent face. '
-        'Preserve the exact original faces, hairstyles, clothes, body proportions, artistic medium, '
-        'lighting, furniture, background, and relative positions. '
-        'One continuous shot, no cuts, no sudden appearances. Camera must follow the USER action, including zoom or tracking if requested. '
-        'Motion must begin at the exact pose and location shown in the reference. '
-        'If a person stands up, their ORIGINAL seated body rises smoothly, leaving their seat empty. '
-        'Never add a standing copy beside a seated original. '
-    )
-    negative = (
-        'NEGATIVE: duplicate person, twin, cloned woman, cloned man, extra limbs, '
-        'extra people, character spawning, replacement body, teleportation, morphing, '
-        'identity swap, costume change, scene cut, camera jump, new background, text, watermark.'
-    )
+        return []
     specific = {
-        'Femme assise se lève': (
-            'The ORIGINAL woman already seated in the reference slowly stands from HER OWN seat. '
-            'Her hips lift from the cushion, knees extend, feet stay grounded, and her original seat becomes EMPTY. '
-            'The original man remains seated with only a subtle head movement. '
-            'At every instant there is exactly one woman and one man.'),
-        'Homme assis se lève': (
-            'The ORIGINAL man already seated in the reference slowly stands from HIS OWN seat. '
-            'His hips lift from the cushion, knees extend, feet stay grounded, and his original seat becomes EMPTY. '
-            'The original woman remains seated with only a subtle head movement. '
-            'At every instant there is exactly one man and one woman.'),
-        'Les deux restent assis': (
-            'Both ORIGINAL people remain seated in their existing seats throughout. '
-            'Only small natural head and hand movements, with no one standing up.'),
-        'Libre': ''
+        'Femme assise se lève': 'The original seated woman stands up naturally from her own seat.',
+        'Homme assis se lève': 'The original seated man stands up naturally from his own seat.',
+        'Les deux restent assis': 'Both original people remain seated throughout the shot.',
     }
     prompts = []
     for i in range(count):
         instruction = lines[min(len(lines)-1, i * len(lines) // count)]
-        movement = (instruction + (' Additional requested motion: ' + specific[action] if action != 'Libre' and i == 0 else ''))
-        if identity and locked:
-            prompt = (f'SCENE {i+1}. ' + common + 'ACTION: ' + movement +
-                      ' Execute the USER action in the exact stated order, without omitting steps or inventing new actions. If too complex for five seconds, advise splitting it. '
-                      'Keep all other people and objects stable. ' + negative)
-        else:
-            prompt = (f'SCENE {i+1}. ACTION: {movement}. Single continuous action, '
-                      'preserve original identities, fixed camera, no extra people, no clones.')
-        prompts.append(prompt)
+        if action != 'Libre' and i == 0 and action in specific:
+            instruction += ' ' + specific[action]
+        prompts.append(kc_unified_prompt(instruction, people=people, duration=5, reference=bool(identity and locked)))
     return prompts
 
 st.subheader('1 · Photo')
@@ -443,17 +442,10 @@ if project:
                 action_en=camera_en=continuity_en=direction_en=style_en=None
             if not translated_ok:
                 st.warning('Cette scène n’a pas de traduction anglaise à jour. Traduis les scènes avant de copier le prompt.')
-            prompt = (f"IMAGE-TO-VIDEO. Duration: {scene['end']-scene['start']:.2f} seconds. "
-                      f"USER DIRECTION: {direction_en or '[TRANSLATION REQUIRED]'}. "
-                      f"EXACT ACTION IN ORDER: {action_en or '[TRANSLATION REQUIRED]'}. "
-                      f"CAMERA: {camera_en or '[TRANSLATION REQUIRED]'}. "
-                      f"CONTINUITY: {continuity_en or '[TRANSLATION REQUIRED]'}. "
-                      f"STYLE: {style_en or '[TRANSLATION REQUIRED]'}. "
-                      f"Reference image is the literal first frame. Maintain the original {people} recurring people "
-                      "with persistent identities, clothing and anatomy. One physical body per person. "
-                      "No duplicate characters, no teleportation, no identity swaps, no sudden object appearance. "
-                      "Do not override explicitly requested camera movement. Keep physical actions continuous. "
-                      "Vertical 9:16; no subtitles, watermarks or extra characters.")
+            prompt = kc_unified_prompt(
+                action_en or '[TRANSLATION REQUIRED]',
+                camera_en or '', continuity_en or '', direction_en or '', style_en or '',
+                people=people, duration=scene['end']-scene['start'], reference=True)
             st.code(prompt, language=None)
             st.download_button('Télécharger le prompt anglais', prompt, file_name=f"scene_{i+1:03d}_prompt.txt", key=f'agent_prompt_{i}', disabled=not translated_ok)
             clip = st.file_uploader('Importer le clip généré (MP4)', type=['mp4'], key=f'agent_clip_{i}')
