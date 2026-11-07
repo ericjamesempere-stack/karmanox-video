@@ -1,575 +1,577 @@
 
-# -*- coding: utf-8 -*-
-# KARMACLIP STUDIO
-# IMAGE -> PROMPT -> VIDEO -> MONTAGE
-
 import io
 import json
+import zipfile
 import shutil
 import subprocess
 import tempfile
-import zipfile
 from pathlib import Path
 
 import streamlit as st
-from PIL import Image, ImageOps, ImageEnhance, ImageDraw, ImageFont
+from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 
 st.set_page_config(
     page_title="KarmaClip Studio",
     page_icon="🎬",
-    layout="wide"
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
 STEPS = [
-    "1. IMAGE",
-    "2. PROMPT",
-    "3. VIDÉO",
-    "4. MONTAGE"
+    "🎨 Image",
+    "✍️ Prompt",
+    "🎥 Vidéo",
+    "🎞️ Montage",
 ]
 
-VIDEO_SITES = {
-    "WAN 2.2": "https://wan.video/",
-    "LoreMotion": "https://loremotion.com/",
-    "LTX Studio": "https://ltx.studio/",
-    "Kling AI": "https://klingai.com/",
-    "Google Veo / Flow": "https://labs.google/fx/tools/flow",
-    "Vidu": "https://www.vidu.com/"
+ENGINES = {
+    "LoreMotion": "https://loremotion.com/generate/",
+    "WAN": "https://wan2.video/fr/free-ai-video-generator",
+    "NiftyVid": "https://igorcsis.github.io/nifty-vid/",
 }
 
-IMAGE_SITES = {
-    "Bing Image Creator": "https://www.bing.com/images/create",
-    "Leonardo AI": "https://app.leonardo.ai/",
-    "Adobe Firefly": "https://firefly.adobe.com/"
-}
-
-STYLES = [
-    "Photoréaliste",
-    "Cinématographique",
-    "Anime / manga",
-    "Illustration",
-    "Surréaliste",
-    "Vintage",
-    "Minimaliste",
-    "Fantastique",
-    "Noir et blanc"
-]
-
-FORMATS = {
+SIZES = {
     "Clip vertical 9:16": (1080, 1920),
     "Pochette carrée 1:1": (3000, 3000),
-    "Paysage 16:9": (1920, 1080)
+    "Paysage 16:9": (1920, 1080),
 }
 
-DEFAULTS = {
-    "kc_step": STEPS[0],
-    "kc_project": "Mon projet",
-    "kc_image": None,
-    "kc_description": "",
-    "kc_lyrics": "",
-    "kc_video_prompt": "",
-    "kc_scenes": [],
-    "kc_engine": "LoreMotion",
-    "kc_final_video": None,
-    "kc_title": "",
-    "kc_artist": ""
+DEFAULT = {
+    "step": STEPS[0],
+    "project": "Mon clip",
+    "idea": "",
+    "lyrics": "",
+    "style": "Cinématographique",
+    "format": "Clip vertical 9:16",
+    "image": None,
+    "image_prompt": "",
+    "video_prompt": "",
+    "movement": "Mouvement naturel et fluide",
+    "camera": "Travelling lent",
+    "mood": "Cinématographique",
+    "duration": 5,
+    "continuity": True,
+    "scenes": [],
+    "engine": "LoreMotion",
+    "final": None,
+    "title": "",
+    "artist": "",
+    "image_version": 0,
 }
 
-for key, value in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+for k, v in DEFAULT.items():
+    if "kc_" + k not in st.session_state:
+        st.session_state["kc_" + k] = v
+
+st.markdown(
+    """
+<style>
+.block-container {
+    max-width: 790px;
+    padding-top: 1rem;
+    padding-bottom: 4rem;
+}
+div.stButton button,
+div.stDownloadButton button,
+div.stLinkButton a {
+    min-height: 49px;
+    border-radius: 13px;
+    font-weight: 650;
+}
+div[data-testid="stImage"] img {
+    border-radius: 15px;
+}
+h1, h2 {
+    letter-spacing: -.025em;
+}
+.kc-sub {
+    opacity: .7;
+    margin-top: -.6rem;
+    margin-bottom: 1.3rem;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
-# =====================================================
-# NAVIGATION CORRIGEE
-# =====================================================
-
-def go_to(step):
-    """Callback execute avant la creation des widgets."""
-    st.session_state["kc_step"] = step
+def go(step):
+    st.session_state.kc_step = step
 
 
-def navigation_button(label, destination, primary=False):
+def nav(label, step, primary=True):
     st.button(
         label,
-        on_click=go_to,
-        args=(destination,),
+        on_click=go,
+        args=(step,),
         type="primary" if primary else "secondary",
-        use_container_width=True
+        use_container_width=True,
     )
 
 
-# =====================================================
-# FONCTIONS IMAGE
-# =====================================================
-
-def read_image(upload):
-    if upload.size > 30 * 1024 * 1024:
-        raise ValueError("Image trop volumineuse : maximum 30 Mo.")
-
-    with Image.open(io.BytesIO(upload.getvalue())) as img:
-        return ImageOps.exif_transpose(img).convert("RGB")
+def png(im):
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
 
 
-def png_bytes(image):
-    buffer = io.BytesIO()
-    image.convert("RGB").save(
-        buffer, format="PNG", optimize=True
-    )
-    return buffer.getvalue()
+def load(raw):
+    with Image.open(io.BytesIO(raw)) as im:
+        return ImageOps.exif_transpose(im).convert("RGB")
 
 
-def get_font(size):
-    paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
-    ]
-
-    for path in paths:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-
-    return ImageFont.load_default()
-
-
-def add_cover_text(image, title, artist):
-    base = image.convert("RGBA")
-    width, height = base.size
-
-    overlay = Image.new(
-        "RGBA", base.size, (0, 0, 0, 0)
-    )
-
-    draw = ImageDraw.Draw(overlay)
-    draw.rectangle(
-        (0, int(height * 0.72), width, height),
-        fill=(0, 0, 0, 160)
-    )
-
-    base = Image.alpha_composite(base, overlay)
-    draw = ImageDraw.Draw(base)
-
-    if title.strip():
-        draw.text(
-            (width // 2, int(height * 0.81)),
-            title.strip()[:45],
-            font=get_font(max(20, width // 20)),
-            anchor="mm",
-            fill="white",
-            stroke_width=2,
-            stroke_fill="black"
-        )
-
-    if artist.strip():
-        draw.text(
-            (width // 2, int(height * 0.92)),
-            artist.strip()[:45],
-            font=get_font(max(16, width // 32)),
-            anchor="mm",
-            fill="white"
-        )
-
-    return base.convert("RGB")
-
-
-def build_image_prompt(description, style, image_format,
-                       lyrics="", details=""):
+def image_prompt():
+    s = st.session_state
     parts = [
-        "Create a beautiful, original image.",
-        f"Style: {style}.",
-        f"Format: {image_format}.",
-        "Professional composition and lighting.",
-        "Coherent anatomy, detailed textures.",
-        "No watermark."
+        f"Create an original {s.kc_style.lower()} image, "
+        f"{s.kc_format}.",
     ]
 
-    if description.strip():
-        parts.append("Subject: " + description.strip())
-
-    if lyrics.strip():
+    if s.kc_idea.strip():
         parts.append(
-            "Visual inspiration from lyrics: "
-            + lyrics.strip()[:600]
+            f"Subject and story: {s.kc_idea.strip()}."
         )
 
-    if details.strip():
-        parts.append("Additional details: " + details.strip())
+    if s.kc_lyrics.strip():
+        parts.append(
+            "Inspired by these lyrics: "
+            + s.kc_lyrics[:700]
+        )
+
+    parts.append(
+        "Professional composition, coherent details, "
+        "natural anatomy, no watermarks."
+    )
+    return "\n".join(parts)
+
+
+def video_prompt(scene=None):
+    s = st.session_state
+
+    subject = (
+        scene if scene is not None else s.kc_idea
+    ).strip()
+
+    if not subject:
+        subject = "Animate the supplied reference image"
+
+    parts = [
+        f"Scene: {subject}.",
+        f"Movement: {s.kc_movement}.",
+        f"Camera: {s.kc_camera}.",
+        f"Mood: {s.kc_mood}.",
+        f"Duration: {s.kc_duration} seconds.",
+    ]
+
+    if s.kc_continuity:
+        parts.append(
+            "Preserve subject identity, face, clothes "
+            "and environment between shots."
+        )
+    else:
+        parts.append(
+            "Allow visual changes between shots."
+        )
+
+    parts.append(
+        "Smooth cinematic motion, stable anatomy, "
+        "no watermark."
+    )
 
     return "\n".join(parts)
 
 
-def build_video_prompt(scene, action, camera, mood,
-                       duration, continuity):
-    parts = [
-        "Create a cinematic image-to-video sequence.",
-        f"Duration: {duration} seconds.",
-        f"Scene: {scene or 'Use reference image'}.",
-        f"Action: {action}.",
-        f"Camera: {camera}.",
-        f"Mood: {mood}.",
-        "Smooth natural movement.",
-        "Stable perspective and anatomy."
-    ]
-
-    if continuity:
-        parts.append(
-            "Preserve faces, identities, clothing, "
-            "colors and environment."
-        )
-
-    return "\n".join(parts)
-
-
-def create_scenes(text, count):
+def build_scenes(text, n):
     lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("[")
+        x.strip()
+        for x in text.splitlines()
+        if x.strip() and not x.strip().startswith("[")
     ]
 
     if not lines:
-        lines = ["Natural cinematic movement"]
+        lines = [
+            st.session_state.kc_idea
+            or "Cinematic movement"
+        ]
 
     result = []
 
-    for index in range(count):
-        start = index * len(lines) // count
-        end = (index + 1) * len(lines) // count
+    for i in range(n):
+        start = i * len(lines) // n
+        end = (i + 1) * len(lines) // n
 
-        description = " ".join(lines[start:end]).strip()
+        description = " ".join(
+            lines[start:end]
+        ).strip()
 
         if not description:
-            description = lines[index % len(lines)]
+            description = lines[i % len(lines)]
 
         result.append({
-            "number": index + 1,
+            "description": description,
             "duration": 5,
-            "description": description
         })
 
     return result
 
 
-# =====================================================
-# MONTAGE VIDEO
-# =====================================================
-
-def ffmpeg_available():
-    return shutil.which("ffmpeg") is not None
+def reset():
+    for k in list(st.session_state):
+        if k.startswith("kc_"):
+            del st.session_state[k]
 
 
-def run_ffmpeg(command, timeout=180):
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=timeout
-    )
+def export_project():
+    data = {
+        k: st.session_state.get("kc_" + k)
+        for k in DEFAULT
+        if k not in ("image", "final")
+    }
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            result.stderr[-1500:] or "Erreur FFmpeg."
+    buf = io.BytesIO()
+
+    with zipfile.ZipFile(
+        buf, "w", zipfile.ZIP_DEFLATED
+    ) as z:
+        z.writestr(
+            "project.json",
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
 
+        if st.session_state.kc_image:
+            z.writestr(
+                "image.png",
+                st.session_state.kc_image,
+            )
 
-def assemble_videos(clips, audio, size):
-    if not ffmpeg_available():
-        raise RuntimeError("FFmpeg absent du serveur.")
+    return buf.getvalue()
 
-    if not clips:
-        raise ValueError("Aucune vidéo importée.")
 
-    width, height = size
+def import_project(raw):
+    with zipfile.ZipFile(
+        io.BytesIO(raw)
+    ) as z:
+        if "project.json" not in z.namelist():
+            raise ValueError(
+                "Fichier project.json manquant"
+            )
 
-    with tempfile.TemporaryDirectory() as folder:
-        root = Path(folder)
-        prepared = []
+        data = json.loads(
+            z.read("project.json")
+        )
 
-        for index, clip in enumerate(clips):
-            source = root / f"source_{index}.mp4"
-            target = root / f"scene_{index}.mp4"
+        for k in DEFAULT:
+            if (
+                k in data
+                and k not in ("image", "final")
+                and isinstance(data[k], type(DEFAULT[k]))
+            ):
+                st.session_state["kc_" + k] = data[k]
 
-            source.write_bytes(clip.getvalue())
+        if "image.png" in z.namelist():
+            raw_image = z.read("image.png")
+            st.session_state.kc_image = png(
+                load(raw_image)
+            )
 
-            video_filter = (
-                f"scale={width}:{height}:"
+        st.session_state.kc_final = None
+        st.session_state.kc_image_version += 1
+
+
+def montage(files, music, size):
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError(
+            "FFmpeg non installé sur le serveur"
+        )
+
+    def run(cmd):
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+
+        if p.returncode:
+            raise RuntimeError(p.stderr[-900:])
+
+    w, h = size
+
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        paths = []
+
+        for i, f in enumerate(files):
+            src = folder / f"input_{i}.mp4"
+            dst = folder / f"clip_{i}.mp4"
+
+            src.write_bytes(f.getvalue())
+
+            vf = (
+                f"scale={w}:{h}:"
                 "force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
                 "setsar=1,fps=25,format=yuv420p"
             )
 
-            run_ffmpeg([
+            run([
                 "ffmpeg", "-y",
-                "-i", str(source),
-                "-vf", video_filter,
+                "-i", str(src),
+                "-vf", vf,
                 "-an",
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "26",
-                str(target)
+                "-crf", "27",
+                str(dst),
             ])
 
-            prepared.append(target)
+            paths.append(dst)
 
-        manifest = root / "list.txt"
+        listing = folder / "clips.txt"
 
-        manifest.write_text(
+        listing.write_text(
             "".join(
-                f"file '{item.name}'\n"
-                for item in prepared
-            ),
-            encoding="utf-8"
+                f"file '{p.name}'\n"
+                for p in paths
+            )
         )
 
-        joined = root / "joined.mp4"
+        merged = folder / "merged.mp4"
 
-        run_ffmpeg([
+        run([
             "ffmpeg", "-y",
             "-f", "concat",
             "-safe", "0",
-            "-i", str(manifest),
+            "-i", str(listing),
             "-c", "copy",
-            str(joined)
+            str(merged),
         ])
 
-        if audio is None:
-            return joined.read_bytes()
+        if not music:
+            return merged.read_bytes()
 
-        suffix = Path(audio.name).suffix.lower() or ".mp3"
-        music_path = root / ("music" + suffix)
-        music_path.write_bytes(audio.getvalue())
+        suffix = Path(music.name).suffix.lower()
 
-        final_path = root / "final.mp4"
+        if suffix not in (".mp3", ".wav", ".m4a"):
+            suffix = ".mp3"
 
-        run_ffmpeg([
+        audio = folder / ("sound" + suffix)
+        audio.write_bytes(music.getvalue())
+
+        final = folder / "final.mp4"
+
+        run([
             "ffmpeg", "-y",
-            "-i", str(joined),
-            "-i", str(music_path),
+            "-i", str(merged),
+            "-i", str(audio),
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac",
             "-shortest",
             "-movflags", "+faststart",
-            str(final_path)
+            str(final),
         ])
 
-        return final_path.read_bytes()
+        return final.read_bytes()
 
-
-# =====================================================
-# SAUVEGARDE
-# =====================================================
-
-def backup_project():
-    fields = [
-        "project", "description", "lyrics",
-        "video_prompt", "scenes",
-        "engine", "title", "artist"
-    ]
-
-    data = {
-        field: st.session_state.get("kc_" + field)
-        for field in fields
-    }
-
-    buffer = io.BytesIO()
-
-    with zipfile.ZipFile(
-        buffer, "w", zipfile.ZIP_DEFLATED
-    ) as archive:
-        archive.writestr(
-            "projet.json",
-            json.dumps(
-                data,
-                ensure_ascii=False,
-                indent=2
-            )
-        )
-
-        if st.session_state.kc_image:
-            archive.writestr(
-                "image.png",
-                st.session_state.kc_image
-            )
-
-    return buffer.getvalue()
-
-
-def restore_project(upload):
-    if upload.size > 80 * 1024 * 1024:
-        raise ValueError("Archive trop volumineuse.")
-
-    with zipfile.ZipFile(
-        io.BytesIO(upload.getvalue())
-    ) as archive:
-        data = json.loads(
-            archive.read("projet.json")
-        )
-
-        fields = [
-            "project", "description", "lyrics",
-            "video_prompt", "scenes",
-            "engine", "title", "artist"
-        ]
-
-        for field in fields:
-            if field in data:
-                st.session_state[
-                    "kc_" + field
-                ] = data[field]
-
-        if "image.png" in archive.namelist():
-            raw = archive.read("image.png")
-
-            with Image.open(io.BytesIO(raw)) as img:
-                img.verify()
-
-            st.session_state.kc_image = raw
-
-
-# =====================================================
-# INTERFACE
-# =====================================================
 
 st.title("🎬 KarmaClip Studio")
-st.caption("IMAGE → PROMPT facultatif → VIDÉO → MONTAGE")
 
-st.text_input(
-    "Nom du projet",
-    key="kc_project"
+st.markdown(
+    '<div class="kc-sub">'
+    "Une idée → une image → une vidéo → ton clip"
+    "</div>",
+    unsafe_allow_html=True,
 )
 
+with st.expander("📁 Mon projet et sauvegarde"):
+    st.text_input(
+        "Nom du projet",
+        key="kc_project",
+    )
+
+    st.download_button(
+        "💾 Sauvegarder mon projet",
+        export_project(),
+        file_name="KarmaClip_projet.zip",
+        mime="application/zip",
+        use_container_width=True,
+    )
+
+    restore = st.file_uploader(
+        "Restaurer un projet ZIP",
+        type=["zip"],
+        key="restore_upload",
+    )
+
+    if restore:
+        def do_restore():
+            try:
+                import_project(
+                    st.session_state.restore_upload.getvalue()
+                )
+                st.session_state.kc_notice = (
+                    "Projet restauré."
+                )
+            except Exception as e:
+                st.session_state.kc_notice = (
+                    f"Erreur de restauration : {e}"
+                )
+
+        st.button(
+            "Restaurer ce projet",
+            on_click=do_restore,
+            use_container_width=True,
+        )
+
+    st.button(
+        "🧹 Nouveau projet",
+        on_click=reset,
+        use_container_width=True,
+    )
+
+if st.session_state.get("kc_notice"):
+    st.info(
+        st.session_state.pop("kc_notice")
+    )
+
 st.radio(
-    "Étape du projet",
+    "Étapes",
     STEPS,
+    key="kc_step",
     horizontal=True,
-    key="kc_step"
+    label_visibility="collapsed",
 )
 
 st.divider()
 
 
-# =====================================================
+# ======================================================
 # 1. IMAGE
-# =====================================================
+# ======================================================
 
 if st.session_state.kc_step == STEPS[0]:
 
-    st.header("🎨 Studio Image")
+    st.header("🎨 Ton image")
 
-    mode = st.radio(
-        "Que veux-tu faire ?",
-        [
-            "Créer une image",
-            "Modifier une photo",
-            "Créer une pochette"
-        ]
+    st.caption(
+        "Décris ton idée une fois : "
+        "elle suivra automatiquement ton projet."
     )
 
     st.text_area(
-        "Décris ton image",
-        key="kc_description",
-        height=130,
-        placeholder="Un tigre au regard intense..."
+        "Que veux-tu créer ?",
+        key="kc_idea",
+        height=110,
+        placeholder=(
+            "Un tigre au regard intense, "
+            "dans une forêt brumeuse…"
+        ),
     )
 
-    style = st.selectbox("Style visuel", STYLES)
-    image_format = st.selectbox(
-        "Format",
-        list(FORMATS)
+    a, b = st.columns(2)
+
+    with a:
+        st.selectbox(
+            "Style",
+            [
+                "Cinématographique",
+                "Photoréaliste",
+                "Anime / manga",
+                "Fantastique",
+                "Illustration",
+                "Vintage",
+                "Noir et blanc",
+            ],
+            key="kc_style",
+        )
+
+    with b:
+        st.selectbox(
+            "Format",
+            list(SIZES),
+            key="kc_format",
+        )
+
+    with st.expander(
+        "🎵 Paroles ou histoire (facultatif)"
+    ):
+        st.text_area(
+            "Paroles de la chanson",
+            key="kc_lyrics",
+            height=160,
+        )
+
+    st.subheader("✨ Préparer mon image IA")
+
+    st.session_state.kc_image_prompt = (
+        image_prompt()
     )
 
-    st.text_area(
-        "Paroles (facultatives)",
-        key="kc_lyrics",
-        height=120
+    st.code(
+        st.session_state.kc_image_prompt,
+        language=None,
     )
 
-    audio_reference = st.file_uploader(
-        "Musique (facultative)",
-        type=["mp3", "wav", "m4a"],
-        key="kc_audio_reference"
-    )
-
-    if audio_reference:
-        st.audio(audio_reference)
-
-    details = st.text_area(
-        "Précisions supplémentaires",
-        placeholder="Décor, lumière, vêtements, pose..."
-    )
-
-    prompt = build_image_prompt(
-        st.session_state.kc_description,
-        style,
-        image_format,
-        st.session_state.kc_lyrics,
-        details
-    )
-
-    st.subheader("Prompt image")
-    st.code(prompt, language=None)
-
-    st.info(
-        "La génération d'une nouvelle image IA "
-        "passe encore par un site externe."
-    )
-
-    image_engine = st.selectbox(
-        "Générateur d'images",
-        list(IMAGE_SITES)
+    st.caption(
+        "La création IA se fait encore sur un site "
+        "externe ; le prompt est prêt à copier."
     )
 
     st.link_button(
-        "🎨 Ouvrir le générateur",
-        IMAGE_SITES[image_engine],
-        use_container_width=True
+        "🎨 Ouvrir Bing Image Creator",
+        "https://www.bing.com/images/create",
+        use_container_width=True,
     )
 
-    st.divider()
-    st.subheader("Importer et retoucher")
+    st.subheader("📸 Importer ou retoucher mon image")
 
-    upload = st.file_uploader(
-        "Photo ou image générée",
+    uploaded = st.file_uploader(
+        "Choisir une image ou une photo",
         type=["png", "jpg", "jpeg", "webp"],
-        key="kc_image_upload"
+        key="image_upload",
     )
 
-    if upload:
+    if uploaded:
         try:
-            original = read_image(upload)
-            st.image(original, caption="Image originale")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                brightness = st.slider(
-                    "Luminosité", 0.2, 2.0, 1.0, 0.1
-                )
-                contrast = st.slider(
-                    "Contraste", 0.2, 2.0, 1.0, 0.1
-                )
-                saturation = st.slider(
-                    "Couleurs", 0.0, 2.0, 1.0, 0.1
-                )
-
-            with col2:
-                sharpness = st.slider(
-                    "Netteté", 0.0, 3.0, 1.0, 0.1
-                )
-                rotation = st.selectbox(
-                    "Rotation", [0, 90, 180, 270]
-                )
-                grayscale = st.checkbox("Noir et blanc")
-
-            result = original.rotate(
-                rotation, expand=True
+            original = load(
+                uploaded.getvalue()
             )
 
+            with st.expander(
+                "🎛️ Retouches (facultatif)"
+            ):
+                brightness = st.slider(
+                    "Luminosité",
+                    0.2, 2.0, 1.0, 0.1,
+                )
+
+                contrast = st.slider(
+                    "Contraste",
+                    0.2, 2.0, 1.0, 0.1,
+                )
+
+                saturation = st.slider(
+                    "Couleurs",
+                    0.0, 2.0, 1.0, 0.1,
+                )
+
+                blur = st.slider(
+                    "Flou",
+                    0.0, 4.0, 0.0, 0.5,
+                )
+
+                bw = st.checkbox(
+                    "Noir et blanc"
+                )
+
             result = ImageEnhance.Brightness(
-                result
+                original
             ).enhance(brightness)
 
             result = ImageEnhance.Contrast(
@@ -580,466 +582,449 @@ if st.session_state.kc_step == STEPS[0]:
                 result
             ).enhance(saturation)
 
-            result = ImageEnhance.Sharpness(
-                result
-            ).enhance(sharpness)
+            if bw:
+                result = ImageOps.grayscale(
+                    result
+                ).convert("RGB")
 
-            if grayscale:
-                result = result.convert("L").convert("RGB")
+            if blur:
+                result = result.filter(
+                    ImageFilter.GaussianBlur(blur)
+                )
 
             result = ImageOps.fit(
                 result,
-                FORMATS[image_format],
-                method=Image.Resampling.LANCZOS
+                SIZES[st.session_state.kc_format],
+                method=Image.Resampling.LANCZOS,
             )
 
-            if mode == "Créer une pochette":
-                st.text_input(
-                    "Titre du single",
-                    key="kc_title"
-                )
-                st.text_input(
-                    "Artiste",
-                    key="kc_artist"
-                )
+            st.image(
+                result,
+                caption="Aperçu",
+                use_container_width=True,
+            )
 
-                if st.checkbox(
-                    "Afficher le titre",
-                    value=True
-                ):
-                    result = add_cover_text(
-                        result,
-                        st.session_state.kc_title,
-                        st.session_state.kc_artist
-                    )
-
-            result_data = png_bytes(result)
-
-            st.subheader("Résultat")
-            st.image(result_data)
+            ready = png(result)
 
             st.download_button(
-                "💾 Enregistrer l'image",
-                result_data,
+                "⬇️ Télécharger cette image",
+                ready,
                 file_name="KarmaClip_image.png",
                 mime="image/png",
-                use_container_width=True
+                use_container_width=True,
             )
 
             if st.button(
-                "✅ Valider cette image",
+                "✅ Utiliser cette image dans mon clip",
                 type="primary",
-                use_container_width=True
+                use_container_width=True,
             ):
-                st.session_state.kc_image = result_data
-                st.success("Image conservée dans le projet.")
+                st.session_state.kc_image = ready
 
-        except Exception as exc:
-            st.error(f"Erreur image : {exc}")
+                st.success(
+                    "Image sélectionnée et conservée "
+                    "pour la vidéo !"
+                )
+
+        except Exception as e:
+            st.error(
+                f"Image impossible à ouvrir : {e}"
+            )
 
     if st.session_state.kc_image:
-        st.success("Image du projet prête.")
+        st.success("Image du projet prête")
+
         st.image(
             st.session_state.kc_image,
-            width=260
+            width=240,
         )
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        navigation_button(
-            "➡️ Préparer un prompt",
-            STEPS[1]
+    with st.expander(
+        "🎵 Option pochette de single"
+    ):
+        st.text_input(
+            "Titre du single",
+            key="kc_title",
         )
 
-    with col2:
-        navigation_button(
-            "⏭️ Passer à la vidéo",
+        st.text_input(
+            "Nom de l’artiste",
+            key="kc_artist",
+        )
+
+        st.caption(
+            "Pour une pochette, sélectionne le "
+            "format carré avant d’importer ton image."
+        )
+
+    a, b = st.columns(2)
+
+    with a:
+        nav(
+            "✍️ Créer le prompt",
+            STEPS[1],
+            False,
+        )
+
+    with b:
+        nav(
+            "🎥 Passer à la vidéo",
             STEPS[2],
-            primary=True
         )
 
 
-# =====================================================
+# ======================================================
 # 2. PROMPT
-# =====================================================
+# ======================================================
 
 elif st.session_state.kc_step == STEPS[1]:
 
-    st.header("✍️ Prompt vidéo")
-    st.info("Cette étape est facultative.")
+    st.header("✍️ Ton prompt vidéo")
+
+    st.caption(
+        "Tout est prérempli avec ton idée. "
+        "Ajuste seulement ce que tu veux."
+    )
 
     if st.session_state.kc_image:
         st.image(
             st.session_state.kc_image,
-            width=240
+            width=230,
         )
 
-    scene = st.text_area(
-        "Que doit-il se passer ?",
-        value=st.session_state.kc_description,
-        height=130
+    st.text_area(
+        "Description de la scène",
+        key="kc_idea",
+        height=110,
     )
 
-    action = st.text_area(
-        "Mouvements",
-        placeholder="Le personnage marche puis sourit..."
+    st.text_input(
+        "Mouvement du sujet",
+        key="kc_movement",
     )
 
-    camera = st.selectbox(
-        "Caméra",
-        [
-            "Fixe",
-            "Travelling avant",
-            "Travelling arrière",
-            "Panoramique",
-            "Rotation",
-            "Caméra à l'épaule"
-        ]
-    )
+    with st.expander(
+        "🎬 Réalisation et réglages"
+    ):
+        st.selectbox(
+            "Mouvement de caméra",
+            [
+                "Travelling lent",
+                "Caméra fixe",
+                "Travelling avant",
+                "Travelling arrière",
+                "Rotation autour du sujet",
+                "Caméra à l’épaule",
+            ],
+            key="kc_camera",
+        )
 
-    mood = st.selectbox(
-        "Ambiance",
-        [
-            "Cinématographique",
-            "Festive",
-            "Dynamique",
-            "Mélancolique",
-            "Mystérieuse",
-            "Épique",
-            "Naturelle"
-        ]
-    )
+        st.selectbox(
+            "Ambiance",
+            [
+                "Cinématographique",
+                "Festive",
+                "Dynamique",
+                "Mystérieuse",
+                "Épique",
+                "Romantique",
+                "Naturelle",
+            ],
+            key="kc_mood",
+        )
 
-    duration = st.selectbox(
-        "Durée de la scène",
-        [3, 4, 5, 6, 8, 10],
-        index=2
-    )
+        st.selectbox(
+            "Durée (secondes)",
+            [3, 4, 5, 6, 8, 10],
+            key="kc_duration",
+        )
 
-    continuity = st.checkbox(
-        "Conserver les visages et vêtements",
-        value=True
-    )
-
-    generated = build_video_prompt(
-        scene,
-        action or "Natural movement",
-        camera,
-        mood,
-        duration,
-        continuity
-    )
-
-    edited_prompt = st.text_area(
-        "Prompt vidéo modifiable",
-        value=generated,
-        height=220
-    )
-
-    st.code(edited_prompt, language=None)
+        st.checkbox(
+            "Conserver visage, vêtements et décor",
+            key="kc_continuity",
+        )
 
     if st.button(
-        "💾 Conserver ce prompt",
-        use_container_width=True
+        "✨ Composer / actualiser le prompt",
+        use_container_width=True,
     ):
-        st.session_state.kc_video_prompt = edited_prompt
-        st.success("Prompt conservé.")
-
-    st.divider()
-    st.subheader("Storyboard")
-
-    story = st.text_area(
-        "Paroles ou scénario",
-        value=st.session_state.kc_lyrics,
-        height=160
-    )
-
-    count = st.number_input(
-        "Nombre de scènes de 5 secondes",
-        min_value=1,
-        max_value=100,
-        value=6
-    )
-
-    if st.button("Créer les scènes"):
-        st.session_state.kc_scenes = create_scenes(
-            story or scene,
-            count
-        )
-
-    for index, item in enumerate(
-        st.session_state.kc_scenes
-    ):
-        with st.expander(f"Scène {index + 1}"):
-            description = st.text_area(
-                "Description",
-                value=item["description"],
-                key=f"kc_scene_{index}"
-            )
-
-            st.session_state.kc_scenes[
-                index
-            ]["description"] = description
-
-            st.code(
-                build_video_prompt(
-                    description,
-                    action or "Natural movement",
-                    camera,
-                    mood,
-                    5,
-                    continuity
-                ),
-                language=None
-            )
-
-    # La sauvegarde du prompt s'effectue
-    # dans le callback, avant le prochain rerun.
-    def save_prompt_and_continue():
         st.session_state.kc_video_prompt = (
-            st.session_state.kc_prompt_to_save
+            video_prompt()
         )
-        st.session_state.kc_step = STEPS[2]
 
-    st.session_state.kc_prompt_to_save = edited_prompt
+    if not st.session_state.kc_video_prompt:
+        st.session_state.kc_video_prompt = (
+            video_prompt()
+        )
 
-    st.button(
-        "➡️ Passer à la vidéo",
-        on_click=save_prompt_and_continue,
-        type="primary",
-        use_container_width=True
+    st.text_area(
+        "Prompt final (modifiable)",
+        key="kc_video_prompt",
+        height=210,
+    )
+
+    with st.expander(
+        "🎞️ Storyboard : scènes de 5 secondes"
+    ):
+        st.caption(
+            "Découpe les paroles ou ton scénario "
+            "en scènes successives."
+        )
+
+        count = st.number_input(
+            "Nombre de scènes",
+            min_value=1,
+            max_value=60,
+            value=6,
+        )
+
+        if st.button(
+            "Créer les scènes",
+            use_container_width=True,
+        ):
+            st.session_state.kc_scenes = (
+                build_scenes(
+                    st.session_state.kc_lyrics
+                    or st.session_state.kc_idea,
+                    int(count),
+                )
+            )
+
+        for i, scene in enumerate(
+            st.session_state.kc_scenes
+        ):
+            with st.expander(
+                f"Scène {i + 1} · 5 s"
+            ):
+                new = st.text_area(
+                    "Action",
+                    value=scene["description"],
+                    key=f"scene_edit_{i}",
+                )
+
+                st.session_state.kc_scenes[i][
+                    "description"
+                ] = new
+
+                st.code(
+                    video_prompt(new),
+                    language=None,
+                )
+
+    nav(
+        "🎥 Continuer vers la vidéo",
+        STEPS[2],
     )
 
 
-# =====================================================
+# ======================================================
 # 3. VIDEO
-# =====================================================
+# ======================================================
 
 elif st.session_state.kc_step == STEPS[2]:
 
-    st.header("🎥 Génération vidéo")
-    st.success("Mode manuel activé.")
+    st.header("🎥 Créer ta vidéo")
+
+    st.caption(
+        "LoreMotion d’abord, WAN ou NiftyVid "
+        "si nécessaire."
+    )
 
     if st.session_state.kc_image:
         st.image(
             st.session_state.kc_image,
-            width=260
+            caption="Ton image de référence",
+            width=300,
         )
 
         st.download_button(
-            "💾 Télécharger l'image de référence",
+            "⬇️ Récupérer l’image pour le moteur",
             st.session_state.kc_image,
             file_name="KarmaClip_reference.png",
             mime="image/png",
-            use_container_width=True
+            use_container_width=True,
         )
 
-    engine = st.selectbox(
-        "Choisir le moteur",
-        list(VIDEO_SITES),
-        index=(
-            list(VIDEO_SITES).index(
-                st.session_state.kc_engine
-            )
-            if st.session_state.kc_engine in VIDEO_SITES
-            else 0
+    else:
+        st.info(
+            "Aucune image enregistrée. "
+            "Tu peux créer une vidéo à partir du texte."
         )
+
+    st.selectbox(
+        "Choisir un moteur",
+        list(ENGINES),
+        key="kc_engine",
     )
-
-    st.session_state.kc_engine = engine
 
     st.link_button(
-        f"🚀 Ouvrir {engine}",
-        VIDEO_SITES[engine],
-        use_container_width=True
+        "🚀 Ouvrir directement le générateur "
+        + st.session_state.kc_engine,
+        ENGINES[st.session_state.kc_engine],
+        use_container_width=True,
     )
-
-    current_prompt = (
-        st.session_state.kc_video_prompt
-        or build_video_prompt(
-            st.session_state.kc_description,
-            "Natural movement",
-            "Fixed camera",
-            "Cinematic",
-            5,
-            True
-        )
-    )
-
-    prompt = st.text_area(
-        "Prompt à utiliser",
-        value=current_prompt,
-        height=200
-    )
-
-    st.code(prompt, language=None)
 
     st.caption(
-        "Copie le prompt et utilise l'image "
-        "sur le site du générateur choisi."
+        "Le navigateur ou l’application associée "
+        "s’ouvrira selon Android. Le remplissage "
+        "automatique du site externe n’est pas disponible."
     )
 
-    st.subheader("Tous les moteurs")
+    st.subheader("✍️ Prompt prêt à utiliser")
 
-    for name, url in VIDEO_SITES.items():
-        with st.expander(name):
-            st.link_button(
-                f"Ouvrir {name}",
-                url,
-                use_container_width=True
-            )
+    if not st.session_state.kc_video_prompt:
+        st.session_state.kc_video_prompt = (
+            video_prompt()
+        )
 
-    st.divider()
-    st.subheader("Mode automatique")
-
-    st.toggle(
-        "Automatique",
-        value=False,
-        disabled=True,
-        help="Pas encore connecté."
+    st.text_area(
+        "Prompt conservé du projet",
+        key="kc_video_prompt",
+        height=200,
     )
 
-    st.info(
-        "Le mode automatique sera ajouté "
-        "après intégration d'un moteur fonctionnel."
+    st.caption(
+        "Tu peux sélectionner le texte pour le copier "
+        "dans le générateur externe."
     )
 
-    navigation_button(
-        "➡️ Passer au montage",
+    if st.session_state.kc_scenes:
+        with st.expander(
+            "🎞️ Mes prompts scène par scène"
+        ):
+            for i, scene in enumerate(
+                st.session_state.kc_scenes
+            ):
+                st.markdown(
+                    f"**Scène {i + 1}**"
+                )
+
+                st.code(
+                    video_prompt(
+                        scene["description"]
+                    ),
+                    language=None,
+                )
+
+    with st.expander("ℹ️ À savoir"):
+        st.write(
+            "Les générateurs sont des services "
+            "indépendants. Leurs quotas et leurs "
+            "modalités peuvent évoluer. Aucun "
+            "abonnement ou paiement n’est lancé "
+            "depuis KarmaClip."
+        )
+
+    nav(
+        "🎞️ Passer au montage",
         STEPS[3],
-        primary=True
     )
 
 
-# =====================================================
+# ======================================================
 # 4. MONTAGE
-# =====================================================
+# ======================================================
 
-elif st.session_state.kc_step == STEPS[3]:
+else:
 
-    st.header("🎞️ Montage vidéo")
+    st.header("🎞️ Monter ton clip")
+
+    st.caption(
+        "Importe les scènes MP4 dans l’ordre "
+        "souhaité et ajoute la musique."
+    )
 
     clips = st.file_uploader(
-        "Importer les vidéos MP4",
+        "Mes vidéos MP4",
         type=["mp4"],
         accept_multiple_files=True,
-        key="kc_clips"
+        key="montage_clips",
     )
 
     if clips:
-        for index, clip in enumerate(clips):
+        for i, f in enumerate(clips):
             with st.expander(
-                f"{index + 1}. {clip.name}"
+                f"Scène {i + 1} — {f.name}"
             ):
-                st.video(clip)
+                st.video(f)
 
-    audio = st.file_uploader(
-        "Musique facultative",
+    music = st.file_uploader(
+        "Musique (facultative)",
         type=["mp3", "wav", "m4a"],
-        key="kc_music"
+        key="montage_music",
     )
 
-    if audio:
-        st.audio(audio)
+    if music:
+        st.audio(music)
 
-    output_format = st.selectbox(
-        "Format du montage",
+    fmt = st.selectbox(
+        "Format de sortie",
         [
             "Vertical 9:16",
             "Carré 1:1",
-            "Paysage 16:9"
-        ]
+            "Paysage 16:9",
+        ],
     )
 
-    sizes = {
+    formats = {
         "Vertical 9:16": (720, 1280),
         "Carré 1:1": (1080, 1080),
-        "Paysage 16:9": (1280, 720)
+        "Paysage 16:9": (1280, 720),
     }
 
-    if not ffmpeg_available():
+    ready = bool(
+        shutil.which("ffmpeg")
+    )
+
+    if not ready:
         st.warning(
-            "FFmpeg absent du serveur. "
-            "Le montage ne peut pas fonctionner ici."
+            "FFmpeg est absent du serveur. "
+            "Le montage ne peut pas démarrer."
         )
 
     if st.button(
-        "🎬 Assembler les vidéos",
+        "🎬 Assembler mon clip",
         type="primary",
-        disabled=not clips or not ffmpeg_available(),
-        use_container_width=True
+        use_container_width=True,
+        disabled=not clips or not ready,
     ):
         try:
-            with st.spinner("Montage en cours..."):
-                result = assemble_videos(
-                    clips,
-                    audio,
-                    sizes[output_format]
+            with st.spinner(
+                "Assemblage du clip…"
+            ):
+                st.session_state.kc_final = (
+                    montage(
+                        clips,
+                        music,
+                        formats[fmt],
+                    )
                 )
 
-            st.session_state.kc_final_video = result
-            st.success("Montage terminé.")
+            st.success(
+                "Ton clip est prêt !"
+            )
 
-        except Exception as exc:
-            st.error(f"Montage impossible : {exc}")
+        except Exception as e:
+            st.error(
+                f"Échec du montage : {e}"
+            )
 
-    if st.session_state.kc_final_video:
-        st.video(st.session_state.kc_final_video)
-
-        st.download_button(
-            "⬇️ Télécharger le MP4 final",
-            st.session_state.kc_final_video,
-            file_name="KarmaClip_final.mp4",
-            mime="video/mp4",
-            use_container_width=True
+    if st.session_state.kc_final:
+        st.video(
+            st.session_state.kc_final
         )
 
-
-# =====================================================
-# SAUVEGARDE ET RESTAURATION
-# =====================================================
+        st.download_button(
+            "⬇️ Télécharger mon MP4",
+            st.session_state.kc_final,
+            file_name="KarmaClip_final.mp4",
+            mime="video/mp4",
+            use_container_width=True,
+        )
 
 st.divider()
 
-with st.expander("💾 Sauvegarde du projet"):
-
-    st.download_button(
-        "Sauvegarder le projet ZIP",
-        backup_project(),
-        file_name="KarmaClip_projet.zip",
-        mime="application/zip",
-        use_container_width=True
-    )
-
-    restore = st.file_uploader(
-        "Restaurer un projet ZIP",
-        type=["zip"],
-        key="kc_restore"
-    )
-
-    if restore and st.button("Restaurer"):
-        try:
-            restore_project(restore)
-            st.success("Projet restauré.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Restauration impossible : {exc}")
-
-
-with st.expander("⚙️ Nouveau projet"):
-
-    def reset_project():
-        for key in list(st.session_state):
-            if key.startswith("kc_"):
-                del st.session_state[key]
-
-    st.button(
-        "🧹 Effacer le projet actuel",
-        on_click=reset_project,
-        use_container_width=True
-    )
-
 st.caption(
-    "KarmaClip Studio | Image → Prompt → Vidéo → Montage"
+    "KarmaClip Studio · "
+    "Image → Prompt → Vidéo → Montage"
 )
