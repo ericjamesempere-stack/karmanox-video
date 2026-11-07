@@ -84,7 +84,10 @@ def generate(image_bytes, filename, prompt):
                     current = raw[6:].strip()
                 elif raw.startswith("data:"):
                     if current == "error":
-                        raise RuntimeError(raw[5:][:300])
+                        detail = raw[5:].strip()
+                        if detail in ('null', '"null"', '', '{}'):
+                            raise RuntimeError('Le serveur WAN 2.2 a échoué sans fournir de détail (erreur Gradio null). Essaie plus tard ou sélectionne un autre générateur en mode Manuel.')
+                        raise RuntimeError('WAN 2.2 : ' + detail[:300])
                     if current == "complete":
                         video_url = find_video_url(json.loads(raw[5:]))
                         if not video_url:
