@@ -20,6 +20,25 @@ st.set_page_config(page_title='KarmaClip Studio', page_icon='🎬', layout='cent
 st.title('🎬 KarmaClip Studio')
 st.caption('Une photo · une idée · une vidéo — version simplifiée')
 
+# Sélection immédiatement visible sur téléphone, avant les autres réglages.
+st.subheader('🎥 Générateur vidéo')
+engine_options = ['Wan 2.2 (direct, photo requise)', 'LoreMotion (externe : texte ou photo)', 'LTX (externe : texte ou photo)']
+engine_mode = st.radio('Mode de sélection', ['Manuel', 'Automatique'], horizontal=True, key='kc_engine_mode')
+if engine_mode == 'Manuel':
+    engine = st.selectbox('Choisir mon générateur', engine_options, key='kc_manual_engine')
+else:
+    engine = engine_options[0]
+    st.info('Automatique : seul WAN 2.2 dispose actuellement d’une connexion directe. Pas de faux basculement vers LoreMotion ou LTX.')
+if engine.startswith('LoreMotion'):
+    st.link_button('🎥 Générer avec LoreMotion (site externe)', 'https://loremotion.com/', use_container_width=True)
+    st.caption('Génération sur le site LoreMotion ; importe ensuite le MP4 dans KarmaClip pour le montage.')
+elif engine.startswith('LTX'):
+    st.link_button('🎥 Générer avec LTX Studio (site externe)', 'https://ltx.studio/', use_container_width=True)
+    st.caption('Génération sur le site LTX ; importe ensuite le MP4 dans KarmaClip pour le montage.')
+else:
+    st.caption('WAN 2.2 : génération directe dans KarmaClip, sous réserve de disponibilité du serveur public.')
+st.divider()
+
 # Nouveau projet : effacer les saisies, fichiers et résultats de la session.
 # Ne supprime aucun fichier sur GitHub ni aucun projet exporté par l'utilisateur.
 if st.button('🧹 Nouveau projet — vider tous les champs', key='kc_clear_all', use_container_width=True):
@@ -118,14 +137,7 @@ if music:
     st.caption(f'Musique reçue : {music.name} ({music.size / (1024*1024):.1f} Mo). Elle sert de référence, pas de synchronisation automatique dans cette version.')
 
 st.subheader('3 · Génération')
-# Mode automatique : seuls les moteurs avec intégration serveur réelle sont éligibles.
-engine_options = ['Wan 2.2 (direct, photo requise)', 'LoreMotion (externe : texte ou photo)', 'LTX (externe : texte ou photo)']
-engine_mode = st.radio('Sélection du générateur', ['Automatique', 'Manuel'], horizontal=True, key='kc_engine_mode')
-if engine_mode == 'Automatique':
-    engine = engine_options[0]
-    st.info('Automatique : WAN 2.2 est actuellement le seul moteur connecté. LoreMotion et LTX restent manuels tant qu’aucune intégration gratuite fiable n’est disponible.')
-else:
-    engine = st.selectbox('Choisir un moteur', engine_options, key='kc_manual_engine')
+st.caption('Le choix du moteur se trouve tout en haut de la page, dans « Générateur vidéo ».')
 
 input_mode = st.radio('Entrée vidéo', ['Photo + texte', 'Texte seul'], horizontal=True)
 if engine.startswith('Wan') and input_mode == 'Texte seul':
