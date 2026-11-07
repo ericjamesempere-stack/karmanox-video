@@ -20,23 +20,24 @@ st.set_page_config(page_title='KarmaClip Studio', page_icon='🎬', layout='cent
 st.title('🎬 KarmaClip Studio')
 st.caption('Une photo · une idée · une vidéo — version simplifiée')
 
-# Sélection immédiatement visible sur téléphone, avant les autres réglages.
-st.subheader('🎥 Générateur vidéo')
-engine_options = ['Wan 2.2 (direct, photo requise)', 'LoreMotion (externe : texte ou photo)', 'LTX (externe : texte ou photo)']
-engine_mode = st.radio('Mode de sélection', ['Manuel', 'Automatique'], horizontal=True, key='kc_engine_mode')
-if engine_mode == 'Manuel':
-    engine = st.selectbox('Choisir mon générateur', engine_options, key='kc_manual_engine')
+# Sélection manuelle prioritaire ; aucun moteur externe n'est présenté comme intégré.
+st.subheader('🎥 Générateur vidéo — mode manuel')
+engine_catalog = {
+    'WAN 2.2': ('direct', None),
+    'LoreMotion': ('externe', 'https://loremotion.com/'),
+    'LTX Studio': ('externe', 'https://ltx.studio/'),
+    'Kling AI': ('externe', 'https://klingai.com/'),
+    'Google Veo (Flow)': ('externe', 'https://labs.google/fx/tools/flow'),
+    'Vidu': ('externe', 'https://www.vidu.com/'),
+}
+engine = st.selectbox('Choisir mon générateur', list(engine_catalog), key='kc_manual_engine')
+engine_kind, engine_url = engine_catalog[engine]
+if engine_kind == 'direct':
+    st.warning('WAN 2.2 est relié à KarmaClip, mais le serveur public peut échouer. Aucun résultat garanti.')
 else:
-    engine = engine_options[0]
-    st.info('Automatique : seul WAN 2.2 dispose actuellement d’une connexion directe. Pas de faux basculement vers LoreMotion ou LTX.')
-if engine.startswith('LoreMotion'):
-    st.link_button('🎥 Générer avec LoreMotion (site externe)', 'https://loremotion.com/', use_container_width=True)
-    st.caption('Génération sur le site LoreMotion ; importe ensuite le MP4 dans KarmaClip pour le montage.')
-elif engine.startswith('LTX'):
-    st.link_button('🎥 Générer avec LTX Studio (site externe)', 'https://ltx.studio/', use_container_width=True)
-    st.caption('Génération sur le site LTX ; importe ensuite le MP4 dans KarmaClip pour le montage.')
-else:
-    st.caption('WAN 2.2 : génération directe dans KarmaClip, sous réserve de disponibilité du serveur public.')
+    st.info(f'{engine} : mode manuel externe. La vidéo est créée sur le site du fournisseur, puis importée ici. Vérifie les quotas gratuits sur le site.')
+    st.link_button(f'🎥 Ouvrir {engine}', engine_url, use_container_width=True)
+    st.caption('Prépare ton prompt et ta photo ci-dessous, puis récupère le MP4 généré pour le montage dans KarmaClip.')
 st.divider()
 
 # Nouveau projet : effacer les saisies, fichiers et résultats de la session.
@@ -140,7 +141,7 @@ st.subheader('3 · Génération')
 st.caption('Le choix du moteur se trouve tout en haut de la page, dans « Générateur vidéo ».')
 
 input_mode = st.radio('Entrée vidéo', ['Photo + texte', 'Texte seul'], horizontal=True)
-if engine.startswith('Wan') and input_mode == 'Texte seul':
+if engine_kind == 'direct' and input_mode == 'Texte seul':
     st.warning('WAN direct nécessite une image de départ. Choisis Photo + texte, ou un moteur externe compatible texte-vers-vidéo.')
 continuity_mode = st.selectbox('Image de départ des scènes suivantes', ['Dernière image de la vidéo précédente', 'Photo initiale', 'Image personnalisée par scène'], index=0)
 st.markdown('#### Reprendre une vidéo déjà créée')
@@ -196,14 +197,11 @@ if st.session_state.kc_prompts:
             st.caption('Utilise ce prompt avec la même image de référence en mode image-vers-vidéo.')
     st.download_button('⬇️ Télécharger les prompts', '\n\n'.join(st.session_state.kc_prompts), 'KarmaClip_prompts.txt', 'text/plain', use_container_width=True)
 
-if not engine.startswith('Wan'):
-    st.info('Mode externe : prépare les prompts ici. La génération automatique et la récupération des vidéos ne sont pas connectées pour ce moteur. Texte seul possible si le modèle choisi sur le site le prend en charge.')
-    if engine.startswith('LoreMotion'):
-        st.link_button('🎥 Ouvrir LoreMotion', 'https://loremotion.com/', use_container_width=True)
-    else:
-        st.link_button('🎥 Ouvrir LTX Studio', 'https://ltx.studio/', use_container_width=True)
+if engine_kind == 'externe':
+    st.info(f'{engine} : copie le prompt préparé, utilise la plateforme externe et importe son MP4 dans KarmaClip. La génération directe n’est pas disponible pour ce moteur.')
+    st.link_button(f'🎥 Ouvrir {engine}', engine_url, use_container_width=True)
     if photo_bytes:
-        st.download_button('⬇️ Photo prête pour LoreMotion', photo_bytes, 'KarmaClip_image.png', 'image/png', use_container_width=True)
+        st.download_button('⬇️ Télécharger la photo de référence', photo_bytes, 'KarmaClip_image.png', 'image/png', use_container_width=True)
 else:
     st.caption('WAN 2.2 : génère les scènes dans l’ordre, en utilisant la dernière image de la vidéo précédente. Aucune garantie de quota sur le GPU public.')
     if 'kc_chain_clips' not in st.session_state:
@@ -613,7 +611,7 @@ if st.button('🎬 Analyser la chanson et proposer mon storyboard', type='primar
                     engine = 'LoreMotion'
                 scenes.append({'id':idx+1,'start':start_t,'end':end_t,'action':action,
                                'camera':camera,'continuity':continuity,'status':'à générer',
-                               'engine':engine if engine in ['LoreMotion','Wan 2.2','LTX (si disponible)','Autre'] else 'LoreMotion',
+                               'engine':engine if engine in ['LoreMotion','WAN 2.2','LTX Studio','Kling AI','Google Veo (Flow)','Vidu','Autre'] else 'LoreMotion',
                                'clip_name':''})
             st.session_state.agent_project = {'version':4,'title':agent_title,'style':agent_style or 'Cinématographique réaliste, créativité équilibrée',
                 'characters':int(agent_people),'user_direction':agent_direction,'duration':duration,'approved':False,'scenes':scenes,
@@ -695,7 +693,7 @@ if project:
             scene['action'] = st.text_area('Action / intention', scene['action'], key=f"agent_action_{i}_{project['title']}")
             scene['camera'] = st.text_input('Caméra', scene.get('camera','Caméra stable'), key=f"agent_camera_{i}_{project['title']}")
             scene['continuity'] = st.text_input('Continuité', scene.get('continuity','Identités et décor constants'), key=f"agent_continuity_{i}_{project['title']}")
-            scene['engine'] = st.selectbox('Moteur souhaité', ['LoreMotion','Wan 2.2','LTX (si disponible)','Autre'], index=(['LoreMotion','Wan 2.2','LTX (si disponible)','Autre'].index(scene.get('engine','LoreMotion')) if scene.get('engine','LoreMotion') in ['LoreMotion','Wan 2.2','LTX (si disponible)','Autre'] else 0), key=f"agent_engine_{i}_{project['title']}")
+            scene['engine'] = st.selectbox('Moteur souhaité', ['LoreMotion','WAN 2.2','LTX Studio','Kling AI','Google Veo (Flow)','Vidu','Autre'], index=(['LoreMotion','WAN 2.2','LTX Studio','Kling AI','Google Veo (Flow)','Vidu','Autre'].index(scene.get('engine','LoreMotion')) if scene.get('engine','LoreMotion') in ['LoreMotion','WAN 2.2','LTX Studio','Kling AI','Google Veo (Flow)','Vidu','Autre'] else 0), key=f"agent_engine_{i}_{project['title']}")
             people = project['characters']
             english = scene.get('english',{})
             current={k:scene.get(k,'') for k in ('action','camera','continuity')}
