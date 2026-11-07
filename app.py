@@ -118,7 +118,15 @@ if music:
     st.caption(f'Musique reçue : {music.name} ({music.size / (1024*1024):.1f} Mo). Elle sert de référence, pas de synchronisation automatique dans cette version.')
 
 st.subheader('3 · Génération')
-engine = st.radio('Moteur', ['Wan 2.2 (direct, photo requise)', 'LoreMotion (externe : texte ou photo)', 'LTX (externe : texte ou photo)'], horizontal=False)
+# Mode automatique : seuls les moteurs avec intégration serveur réelle sont éligibles.
+engine_options = ['Wan 2.2 (direct, photo requise)', 'LoreMotion (externe : texte ou photo)', 'LTX (externe : texte ou photo)']
+engine_mode = st.radio('Sélection du générateur', ['Automatique', 'Manuel'], horizontal=True, key='kc_engine_mode')
+if engine_mode == 'Automatique':
+    engine = engine_options[0]
+    st.info('Automatique : WAN 2.2 est actuellement le seul moteur connecté. LoreMotion et LTX restent manuels tant qu’aucune intégration gratuite fiable n’est disponible.')
+else:
+    engine = st.selectbox('Choisir un moteur', engine_options, key='kc_manual_engine')
+
 input_mode = st.radio('Entrée vidéo', ['Photo + texte', 'Texte seul'], horizontal=True)
 if engine.startswith('Wan') and input_mode == 'Texte seul':
     st.warning('WAN direct nécessite une image de départ. Choisis Photo + texte, ou un moteur externe compatible texte-vers-vidéo.')
