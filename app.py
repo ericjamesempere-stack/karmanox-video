@@ -123,6 +123,32 @@ input_mode = st.radio('Entrée vidéo', ['Photo + texte', 'Texte seul'], horizon
 if engine.startswith('Wan') and input_mode == 'Texte seul':
     st.warning('WAN direct nécessite une image de départ. Choisis Photo + texte, ou un moteur externe compatible texte-vers-vidéo.')
 continuity_mode = st.selectbox('Image de départ des scènes suivantes', ['Dernière image de la vidéo précédente', 'Photo initiale', 'Image personnalisée par scène'], index=0)
+st.markdown('#### Reprendre une vidéo déjà créée')
+previous_video = st.file_uploader('📥 Importer la vidéo précédente (MP4, facultatif)', type=['mp4'], key='kc_previous_video', help='KarmaClip extrait sa dernière image pour démarrer la prochaine scène WAN.')
+previous_video_frame = None
+if previous_video:
+    if previous_video.size > 150 * 1024 * 1024:
+        st.error('Vidéo supérieure à 150 Mo. Compresse-la avant de l’importer.')
+    else:
+        try:
+            # The extraction helper is defined later, when the WAN section is reached.
+            import subprocess, tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / 'previous.mp4'
+                target = Path(folder) / 'last.png'
+                source.write_bytes(previous_video.getvalue())
+                result = subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-sseof','-0.12','-i',str(source),'-frames:v','1',str(target)], capture_output=True,text=True,timeout=60)
+                if result.returncode != 0 or not target.exists():
+                    result = subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(source),'-update','1',str(target)], capture_output=True,text=True,timeout=60)
+                if result.returncode != 0 or not target.exists():
+                    raise RuntimeError(result.stderr[-400:] or 'Impossible d’extraire la dernière image')
+                previous_video_frame = target.read_bytes()
+            st.video(previous_video)
+            st.image(previous_video_frame, caption='Dernière image extraite — point de départ de la prochaine scène', width=300)
+        except Exception as exc:
+            st.error('Extraction de la vidéo importée impossible : ' + str(exc))
+
 custom_frames = {}
 if continuity_mode == 'Image personnalisée par scène':
     st.caption('Pour une scène sans image spécifique, KarmaClip reprend la dernière image disponible.')
@@ -194,26 +220,26 @@ else:
         st.session_state.pop('kc_chain_montage', None)
         st.rerun()
     if start_chain:
-        if not photo_bytes or not idea.strip() or input_mode == 'Texte seul':
-            st.warning('WAN direct exige une image de départ et une description. Choisis Photo + texte.')
+        if not (photo_bytes or previous_video_frame) or not idea.strip() or input_mode == 'Texte seul':
+            st.warning('WAN exige une image de départ : ajoute une photo ou importe une vidéo précédente, ainsi qu’une description.')
         else:
             from wan_nifty import generate
             clips = st.session_state.kc_chain_clips
             frames = st.session_state.kc_chain_frames
             # Preserve results only while settings and reference image are unchanged.
-            chain_config = (hashlib.sha256(photo_bytes).hexdigest(), idea, int(count), continuity_mode, people, action, locked, tuple(sorted((k,hashlib.sha256(v).hexdigest()) for k,v in custom_frames.items())))
+            chain_config = (hashlib.sha256(previous_video_frame or photo_bytes).hexdigest(), idea, int(count), continuity_mode, people, action, locked, tuple(sorted((k,hashlib.sha256(v).hexdigest()) for k,v in custom_frames.items())))
             if clips and st.session_state.get('kc_chain_config') != chain_config:
                 st.warning('Les réglages ont changé : recommence la série pour éviter de mélanger deux projets.')
                 st.stop()
             st.session_state.kc_chain_config = chain_config
             if not clips:
-                frames[:] = [photo_bytes]
+                frames[:] = [previous_video_frame or photo_bytes]
             prompts = scenes_from_text(idea, int(count), True, people, action, locked)
             progress = st.progress(min(len(clips)/int(count),1.0))
             for index in range(len(clips), int(count)):
                 try:
                     with st.spinner(f'WAN : scène {index+1}/{count}…'):
-                        source_image = (photo_bytes if continuity_mode == 'Photo initiale' else custom_frames.get(index+1, frames[-1]))
+                        source_image = ((photo_bytes or previous_video_frame) if continuity_mode == 'Photo initiale' else custom_frames.get(index+1, frames[-1]))
                         video = generate(source_image,f'karmaclip_scene_{index+1}.png',prompts[index])
                         if not video or len(video) < 1024:
                             raise RuntimeError('Le moteur n’a pas retourné de vidéo valide')
@@ -227,14 +253,47 @@ else:
                     break
             if len(clips) >= int(count):
                 st.success(f'{count} scènes générées. Tu peux les prévisualiser et les assembler.')
+    # Local backup and restore: no server-side persistence is promised.
+    with st.expander('💾 Sauvegarder / restaurer les scènes WAN'):
+        archive_upload = st.file_uploader('Importer une sauvegarde ZIP KarmaClip', type=['zip'], key='kc_restore_zip')
+        if archive_upload and st.button('📂 Restaurer les scènes', key='kc_restore_now'):
+            try:
+                with zipfile.ZipFile(io.BytesIO(archive_upload.getvalue())) as archive:
+                    members = sorted(name for name in archive.namelist() if re.fullmatch(r'scene_\d{3}\.mp4', name))
+                    if not members or len(members) > 300:
+                        raise ValueError('Aucune scène valide (maximum 300).')
+                    if any(archive.getinfo(name).file_size > 250 * 1024 * 1024 for name in members):
+                        raise ValueError('Une scène dépasse 250 Mo.')
+                    restored = [archive.read(name) for name in members]
+                if any(len(clip) < 1024 for clip in restored):
+                    raise ValueError('Une scène est vide ou invalide.')
+                extracted = [kc_chain_last_frame(clip) for clip in restored]
+                st.session_state.kc_chain_clips = restored
+                st.session_state.kc_chain_frames = ([photo_bytes] if photo_bytes else []) + extracted
+                st.session_state.pop('kc_chain_config', None)
+                st.session_state.pop('kc_chain_montage', None)
+                st.success(f'{len(restored)} scène(s) restaurée(s).')
+                st.info('Les vidéos peuvent être assemblées. La reprise de génération exige de repartir avec les réglages originaux.')
+                st.rerun()
+            except Exception as exc:
+                st.error('Restauration impossible : ' + str(exc))
     clips = st.session_state.kc_chain_clips
     if clips:
+        backup = io.BytesIO()
+        with zipfile.ZipFile(backup, 'w', compression=zipfile.ZIP_STORED) as archive:
+            for index, clip in enumerate(clips, 1):
+                archive.writestr(f'scene_{index:03d}.mp4', clip)
+            archive.writestr('LISEZ_MOI.txt', 'Sauvegarde des scènes KarmaClip WAN.\n')
+        st.download_button('💾 Sauvegarder mes scènes en ZIP', backup.getvalue(),
+                           'KarmaClip_scenes_WAN.zip', 'application/zip',
+                           key='kc_save_wan_zip', use_container_width=True)
         st.write(f'**{len(clips)}/{count} scènes disponibles**')
         for i, video in enumerate(clips):
             with st.expander(f'Scène WAN {i+1}',expanded=(i==len(clips)-1)):
                 st.video(video)
                 st.download_button('⬇️ Télécharger la scène',video,
                                    file_name=f'KarmaClip_WAN_{i+1:03d}.mp4',mime='video/mp4',key=f'kc_chain_dl_{i}')
+        add_music_to_wan = st.checkbox('Ajouter ma chanson au montage WAN', value=bool(music), key='kc_wan_add_music')
         if st.button('🎞️ Assembler les scènes WAN',use_container_width=True):
             try:
                 with tempfile.TemporaryDirectory() as folder:
@@ -247,9 +306,18 @@ else:
                     playlist=root/'concat.txt'
                     playlist.write_text('\n'.join(listing),encoding='utf-8')
                     output=root/'montage.mp4'
-                    cmd=['ffmpeg','-hide_banner','-loglevel','error','-y','-f','concat','-safe','0',
-                         '-i',str(playlist),'-an','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p',
-                         '-movflags','+faststart',str(output)]
+                    cmd=['ffmpeg','-hide_banner','-loglevel','error','-y','-f','concat','-safe','0', '-i',str(playlist)]
+                    if add_music_to_wan and music:
+                        suffix = Path(music.name).suffix.lower()
+                        soundtrack = root / ('music' + (suffix if suffix in ('.mp3', '.wav', '.m4a') else '.mp3'))
+                        soundtrack.write_bytes(music.getvalue())
+                        cmd += ['-i',str(soundtrack),'-map','0:v:0','-map','1:a:0']
+                    else:
+                        cmd += ['-map','0:v:0','-an']
+                    cmd += ['-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p']
+                    if add_music_to_wan and music:
+                        cmd += ['-c:a','aac','-shortest']
+                    cmd += ['-movflags','+faststart',str(output)]
                     result=subprocess.run(cmd,capture_output=True,text=True,timeout=240)
                     if result.returncode or not output.exists():
                         raise RuntimeError(result.stderr[-600:])
@@ -262,7 +330,7 @@ else:
                                'KarmaClip_WAN_montage.mp4','video/mp4',use_container_width=True)
 
 st.divider()
-st.caption('Limites : pas de génération automatique LoreMotion, pas de création IA de corps depuis une tête, pas de montage musical automatique. Ces fonctions nécessitent des services de calcul et une intégration vérifiée.')
+st.caption('Limites : LoreMotion reste externe ; la synchronisation automatique des paroles et la création IA de corps depuis une tête ne sont pas disponibles.')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KarmaClip Agent V3: planning, approvals, resumable production and assembly.
