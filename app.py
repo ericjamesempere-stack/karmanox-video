@@ -8,7 +8,7 @@ st.set_page_config(page_title='KarmaClip Studio', page_icon='🎬', layout='cent
 st.markdown('<style>.block-container{max-width:850px;padding-top:1rem}div.stButton button,div.stDownloadButton button,div.stLinkButton a{min-height:44px;border-radius:12px}</style>',unsafe_allow_html=True)
 ENGINES={'LoreMotion':'https://loremotion.com/generate/','WAN 2.2':'https://wan2.video/fr/free-ai-video-generator','NiftyVid':'https://igorcsis.github.io/nifty-vid/'}
 STEPS=['1 · Image','2 · Scénario IA','3 · Vidéo','4 · Montage']
-DEFAULT={'step':0,'name':'Mon clip','idea':'','lyrics':'','style':'Cinématographique','format':'9:16','image':None,'music':None,'music_name':'','audio_report':None,'scenes':[],'proposals':[],'chosen':0,'continuity':True,'scene_seconds':5,'scene_count':6,'engine':'LoreMotion','clips':{},'order':[],'final':None,'project_seed':0,'export_quality':'720p','export_crf':29}
+DEFAULT={'step':0,'name':'Mon clip','idea':'','lyrics':'','style':'Cinématographique','format':'9:16','image':None,'music':None,'music_name':'','audio_report':None,'scenes':[],'proposals':[],'chosen':0,'continuity':True,'scene_seconds':5,'scene_count':6,'engine':'LoreMotion','clips':{},'order':[],'final':None,'project_seed':0,'export_quality':'480p','export_crf':29}
 for k,v in DEFAULT.items():
     if 'kc_'+k not in st.session_state: st.session_state['kc_'+k]=v
 s=st.session_state
@@ -134,6 +134,14 @@ def filters(item):
     if item.get('mirror') and e!='Miroir':f.append('hflip')
     return f
 
+def clip_disk_path(ident):
+    root=Path(tempfile.gettempdir())/'karmaclip_media'
+    root.mkdir(parents=True,exist_ok=True)
+    return root/(ident+'.mp4')
+
+def cleanup_clip(ident):
+    clip_disk_path(ident).unlink(missing_ok=True)
+
 def montage():
     """Export à faible mémoire: un seul processus FFmpeg par plan, concat sans réencodage."""
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
@@ -149,7 +157,9 @@ def montage():
         root=Path(d);segs=[];total=0.0
         for i,key in enumerate(s.kc_order):
             item=s.kc_clips[key]
-            src=root/f'in{i}.mp4';src.write_bytes(item['bytes'])
+            src=Path(item['path'])
+            if not src.is_file():
+                raise RuntimeError('Vidéo temporaire introuvable. Réimporte tes MP4 après le redémarrage du serveur.')
             duration=probe(src)
             start=max(0.,float(item['start']));end=min(float(item['end']),duration)
             speed=float(item['speed'])
@@ -168,7 +178,6 @@ def montage():
                 '-vf',vf,'-an','-c:v','libx264','-threads','1','-preset','ultrafast',
                 '-crf',crf,'-max_muxing_queue_size','64','-movflags','+faststart',out],timeout=300)
             segs.append(out)
-            src.unlink(missing_ok=True)
         manifest=root/'files.txt'
         manifest.write_text(''.join(f"file '{p.name}'\n" for p in segs),encoding='utf-8')
         joined=root/'joined.mp4'
@@ -181,7 +190,10 @@ def montage():
                 if suffix not in ('.wav','.mp3','.m4a','.aac','.ogg'):suffix='.wav'
                 target=root/(label+suffix);target.write_bytes(blob)
                 tracks.append((target,float(volume)))
-        if not tracks:return joined.read_bytes()
+        if not tracks:
+            target=clip_disk_path('export_'+hashlib.sha256(os.urandom(16)).hexdigest())
+            shutil.copyfile(joined,target)
+            return str(target)
         args=['-threads','1','-i',joined]
         for target,_ in tracks:args+=['-i',target]
         graph=[]
@@ -192,7 +204,9 @@ def montage():
         out=root/'final.mp4'
         ff(args+['-filter_complex',';'.join(graph),'-map','0:v:0','-map','[aout]',
             '-c:v','copy','-c:a','aac','-b:a','128k','-t',total,'-movflags','+faststart',out],timeout=180)
-        return out.read_bytes()
+        target=clip_disk_path('export_'+hashlib.sha256(os.urandom(16)).hexdigest())
+        shutil.copyfile(out,target)
+        return str(target)
 
 st.title('🎬 KarmaClip Studio')
 st.caption('Ton image → une vraie histoire IA → LoreMotion → ton montage')
@@ -332,15 +346,19 @@ else:
     uploads=st.file_uploader('📥 Ajouter des vidéos MP4',type=['mp4'],accept_multiple_files=True,key='video_upload')
     if uploads:
         for up in uploads:
-            raw=up.getvalue();ident=hashlib.sha256(raw).hexdigest()
+            ident=hashlib.sha256((up.name+':'+str(up.size)).encode()).hexdigest()
             if ident not in s.kc_clips:
+                target=clip_disk_path(ident)
+                with target.open('wb') as dst:
+                    up.seek(0)
+                    shutil.copyfileobj(up,dst,1024*1024)
+                up.seek(0)
                 dur=5.
                 if shutil.which('ffprobe'):
                     try:
-                        with tempfile.TemporaryDirectory() as d:
-                            f=Path(d)/'clip.mp4';f.write_bytes(raw);dur=probe(f)
+                        dur=probe(target)
                     except Exception:pass
-                s.kc_clips[ident]={'name':up.name,'bytes':raw,'start':0.,'end':round(dur,2),'speed':1.,'effect':'Aucun','intensity':.5,'fade':0.,'mirror':False}
+                s.kc_clips[ident]={'name':up.name,'path':str(target),'start':0.,'end':round(dur,2),'speed':1.,'effect':'Aucun','intensity':.5,'fade':0.,'mirror':False}
                 s.kc_order.append(ident)
     if s.kc_order:
         total=sum(max(0.,float(s.kc_clips[k]['end'])-float(s.kc_clips[k]['start']))/max(.1,float(s.kc_clips[k]['speed'])) for k in s.kc_order)
@@ -349,7 +367,7 @@ else:
         for i,key in enumerate(s.kc_order):
             item=s.kc_clips[key]
             with st.expander(f'{i+1:02d} · {item["name"]} · {(float(item["end"])-float(item["start"]))/float(item["speed"]):.1f} s',expanded=i==0):
-                st.video(item['bytes'])
+                st.video(item['path'])
                 a,b=st.columns(2)
                 with a:item['start']=st.number_input('Début (secondes)',min_value=0.,value=float(item['start']),step=.1,key=f'start_{key}')
                 with b:item['end']=st.number_input('Fin (secondes)',min_value=.2,value=float(item['end']),step=.1,key=f'end_{key}')
@@ -365,7 +383,7 @@ else:
                 with b:
                     if st.button('⬇️ Descendre',key=f'cd_{key}',disabled=i==len(s.kc_order)-1,use_container_width=True):s.kc_order[i+1],s.kc_order[i]=s.kc_order[i],s.kc_order[i+1];s.kc_final=None;st.rerun()
                 with c:
-                    if st.button('🗑️ Retirer',key=f'cx_{key}',use_container_width=True):s.kc_order.pop(i);s.kc_clips.pop(key,None);s.kc_final=None;st.rerun()
+                    if st.button('🗑️ Retirer',key=f'cx_{key}',use_container_width=True):s.kc_order.pop(i);s.kc_clips.pop(key,None);cleanup_clip(key);s.kc_final=None;st.rerun()
     st.markdown('### 🎧 Audio')
     music=st.file_uploader('Musique de fond (MP3, WAV, M4A)',type=['mp3','wav','m4a'],key='montage_audio')
     if music:s.kc_music=music.getvalue();s.kc_music_name=music.name
@@ -381,17 +399,24 @@ else:
         if st.button('Supprimer la voix off'):s.kc_voice=None;st.rerun()
     st.caption('Les sons des MP4 d’origine sont désactivés. Les pistes audio ajoutées sont mixées et adaptées à la durée du film.')
     st.selectbox('Qualité d’export',['480p','720p','1080p'],key='kc_export_quality',help='720p recommandé pour Render gratuit ; 480p si l’export reste instable.')
-    st.caption('Encodage léger : 24 images/s, 1 thread, séquences traitées séparément. Le montage peut tout de même échouer si Render redémarre.')
+    st.caption('Encodage léger : 24 images/s, 1 thread, fichiers sur disque. Les fichiers temporaires disparaissent si Render redémarre.')
     ready=bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
     if not ready:st.warning('FFmpeg/FFprobe absents sur Render : installer le Dockerfile avant l’export.')
     if st.button('🎬 Exporter le film MP4',type='primary',use_container_width=True,disabled=not ready or not s.kc_order):
         try:
-            with st.spinner('Encodage en cours…'):s.kc_final=montage()
+            with st.spinner('Encodage en cours…'):
+                previous=s.kc_final
+                s.kc_final=montage()
+                if previous and isinstance(previous,str):
+                    Path(previous).unlink(missing_ok=True)
             st.success('Film prêt !')
         except Exception as e:st.error(f'Export impossible : {e}')
-    if s.kc_final:
+    if s.kc_final and isinstance(s.kc_final,str) and Path(s.kc_final).exists():
         st.video(s.kc_final)
-        st.download_button('⬇️ Enregistrer le film MP4',s.kc_final,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
+        with open(s.kc_final,'rb') as output:
+            st.download_button('⬇️ Enregistrer le film MP4',output,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
+    elif s.kc_final:
+        st.warning('Export temporaire perdu après redémarrage. Relance le montage.')
     st.link_button('✂️ CapCut (montage avancé, facultatif)','https://www.capcut.com/editor',use_container_width=True)
     st.caption('Les effets sont visibles après export. Pas encore de timeline tactile, de prévisualisation instantanée des effets ni de transitions animées. Les clips longs peuvent dépasser les limites du serveur gratuit.')
 
