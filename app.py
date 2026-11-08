@@ -8,13 +8,13 @@ st.set_page_config(page_title='KarmaClip Studio', page_icon='🎬', layout='cent
 st.markdown('<style>.block-container{max-width:850px;padding-top:1rem}div.stButton button,div.stDownloadButton button,div.stLinkButton a{min-height:44px;border-radius:12px}</style>',unsafe_allow_html=True)
 ENGINES={'LoreMotion':'https://loremotion.com/generate/','WAN 2.2':'https://wan2.video/fr/free-ai-video-generator','NiftyVid':'https://igorcsis.github.io/nifty-vid/'}
 STEPS=['1 · Image','2 · Scénario IA','3 · Vidéo','4 · Montage']
-DEFAULT={'step':0,'name':'Mon clip','idea':'','lyrics':'','style':'Cinématographique','format':'9:16','image':None,'music':None,'music_name':'','audio_report':None,'scenes':[],'proposals':[],'chosen':0,'continuity':True,'scene_seconds':5,'scene_count':6,'engine':'LoreMotion','clips':{},'order':[],'final':None,'project_seed':0}
+DEFAULT={'step':0,'name':'Mon clip','idea':'','lyrics':'','style':'Cinématographique','format':'9:16','image':None,'music':None,'music_name':'','audio_report':None,'scenes':[],'proposals':[],'chosen':0,'continuity':True,'scene_seconds':5,'scene_count':6,'engine':'LoreMotion','clips':{},'order':[],'final':None,'project_seed':0,'export_quality':'720p','export_crf':29}
 for k,v in DEFAULT.items():
     if 'kc_'+k not in st.session_state: st.session_state['kc_'+k]=v
 s=st.session_state
 
 def gemini_key():
-    return os.getenv('GEMINI_API_KEY','').strip() or (st.secrets.get('GEMINI_API_KEY','') if hasattr(st,'secrets') else '')
+    return os.environ.get('GEMINI_API_KEY','').strip()
 
 def gemini(prompt, max_tokens=8192):
     key=gemini_key()
@@ -135,43 +135,63 @@ def filters(item):
     return f
 
 def montage():
-    """Assemble les plans et mixe éventuellement musique et voix. Rend les MP4 muets par défaut."""
+    """Export à faible mémoire: un seul processus FFmpeg par plan, concat sans réencodage."""
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
-        raise RuntimeError('FFmpeg et FFprobe manquants sur Render. Installer le Dockerfile.')
-    size={'9:16':(720,1280),'1:1':(1080,1080),'16:9':(1280,720)}[s.kc_format]
-    with tempfile.TemporaryDirectory() as d:
-        root=Path(d);segs=[]
+        raise RuntimeError('FFmpeg et FFprobe sont nécessaires pour exporter.')
+    quality=s.get('kc_export_quality','720p')
+    long_edge=1280 if quality=='720p' else 1920 if quality=='1080p' else 854
+    ratio={'9:16':(9,16),'1:1':(1,1),'16:9':(16,9)}[s.kc_format]
+    if ratio==(1,1):size=(long_edge,long_edge)
+    elif ratio==(9,16):size=(int(long_edge*9/16)//2*2,long_edge)
+    else:size=(long_edge,int(long_edge*9/16)//2*2)
+    crf=int(s.get('kc_export_crf',29))
+    with tempfile.TemporaryDirectory(prefix='karmamontage_') as d:
+        root=Path(d);segs=[];total=0.0
         for i,key in enumerate(s.kc_order):
-            item=s.kc_clips[key];src=root/f'in{i}.mp4';src.write_bytes(item['bytes'])
-            dur=probe(src);start=max(0.,float(item['start']));end=min(float(item['end']),dur)
+            item=s.kc_clips[key]
+            src=root/f'in{i}.mp4';src.write_bytes(item['bytes'])
+            duration=probe(src)
+            start=max(0.,float(item['start']));end=min(float(item['end']),duration)
             speed=float(item['speed'])
-            if end-start<.2 or speed<=0:raise RuntimeError(f'Découpe invalide pour la scène {i+1}.')
-            vf=f'scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease,pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25,setpts=(PTS-STARTPTS)/{speed}'
+            if end-start<.2 or speed<=0:raise RuntimeError(f'Découpe invalide pour la séquence {i+1}.')
+            segment_duration=(end-start)/speed
+            total+=segment_duration
+            # Limiter threads, images en attente et fréquence d'images évite les pics RAM.
+            vf=f'scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,setpts=(PTS-STARTPTS)/{speed}'
             fx=filters(item)
             if fx:vf+=','+','.join(fx)
-            segdur=(end-start)/speed;fade=max(0.,min(float(item.get('fade',0)),segdur/2-.02))
-            if fade>.01:vf+=f',fade=t=in:st=0:d={fade:.3f},fade=t=out:st={segdur-fade:.3f}:d={fade:.3f}'
-            vf+=',format=yuv420p';out=root/f'part{i}.mp4'
-            ff(['-ss',start,'-i',src,'-t',end-start,'-vf',vf,'-an','-c:v','libx264','-preset','veryfast','-crf','26','-movflags','+faststart',out]);segs.append(out)
-        manifest=root/'files.txt';manifest.write_text(''.join(f"file '{p.name}'\n" for p in segs))
-        joined=root/'joined.mp4';ff(['-f','concat','-safe','0','-i',manifest,'-c','copy',joined])
+            fade=max(0.,min(float(item.get('fade',0)),segment_duration/2-.02))
+            if fade>.01:vf+=f',fade=t=in:st=0:d={fade:.3f},fade=t=out:st={segment_duration-fade:.3f}:d={fade:.3f}'
+            vf+=',format=yuv420p'
+            out=root/f'part{i:03}.mp4'
+            ff(['-threads','1','-filter_threads','1','-ss',start,'-i',src,'-t',end-start,
+                '-vf',vf,'-an','-c:v','libx264','-threads','1','-preset','ultrafast',
+                '-crf',crf,'-max_muxing_queue_size','64','-movflags','+faststart',out],timeout=300)
+            segs.append(out)
+            src.unlink(missing_ok=True)
+        manifest=root/'files.txt'
+        manifest.write_text(''.join(f"file '{p.name}'\n" for p in segs),encoding='utf-8')
+        joined=root/'joined.mp4'
+        ff(['-threads','1','-f','concat','-safe','0','-i',manifest,'-c','copy','-movflags','+faststart',joined],timeout=120)
         tracks=[]
-        for label,blob,name,volume in [('musique',s.kc_music,s.kc_music_name,s.get('kc_music_volume',1.)),('voix',s.get('kc_voice'),s.get('kc_voice_name','voix.wav'),s.get('kc_voice_volume',1.))]:
-            if blob and volume>0:
+        for label,blob,name,volume in [('musique',s.kc_music,s.kc_music_name,s.get('kc_music_volume',1.)),
+                                        ('voix',s.get('kc_voice'),s.get('kc_voice_name','voix.wav'),s.get('kc_voice_volume',1.))]:
+            if blob and float(volume)>0:
                 suffix=Path(name).suffix.lower()
                 if suffix not in ('.wav','.mp3','.m4a','.aac','.ogg'):suffix='.wav'
-                target=root/(label+suffix);target.write_bytes(blob);tracks.append((target,float(volume)))
+                target=root/(label+suffix);target.write_bytes(blob)
+                tracks.append((target,float(volume)))
         if not tracks:return joined.read_bytes()
-        args=['-i',joined]
+        args=['-threads','1','-i',joined]
         for target,_ in tracks:args+=['-i',target]
-        # Chaque piste est bouclée pour couvrir le clip, puis coupée exactement à sa durée.
-        total=sum((float(s.kc_clips[k]['end'])-float(s.kc_clips[k]['start']))/float(s.kc_clips[k]['speed']) for k in s.kc_order)
         graph=[]
-        for i,(_,vol) in enumerate(tracks,1):graph.append(f'[{i}:a]aresample=44100,volume={vol:.3f},apad,atrim=duration={total:.3f},asetpts=PTS-STARTPTS[a{i}]')
+        for i,(_,vol) in enumerate(tracks,1):
+            graph.append(f'[{i}:a]aresample=44100,volume={vol:.3f},apad,atrim=duration={total:.3f},asetpts=PTS-STARTPTS[a{i}]')
         if len(tracks)==1:graph.append('[a1]anull[aout]')
         else:graph.append(''.join(f'[a{i}]' for i in range(1,len(tracks)+1))+f'amix=inputs={len(tracks)}:duration=longest:normalize=0[aout]')
         out=root/'final.mp4'
-        ff(args+['-filter_complex',';'.join(graph),'-map','0:v:0','-map','[aout]','-c:v','copy','-c:a','aac','-b:a','192k','-t',total,'-movflags','+faststart',out],timeout=900)
+        ff(args+['-filter_complex',';'.join(graph),'-map','0:v:0','-map','[aout]',
+            '-c:v','copy','-c:a','aac','-b:a','128k','-t',total,'-movflags','+faststart',out],timeout=180)
         return out.read_bytes()
 
 st.title('🎬 KarmaClip Studio')
@@ -360,6 +380,8 @@ else:
         s.kc_voice_volume=st.slider('Volume voix',0.,2.,float(s.get('kc_voice_volume',1.)),.1)
         if st.button('Supprimer la voix off'):s.kc_voice=None;st.rerun()
     st.caption('Les sons des MP4 d’origine sont désactivés. Les pistes audio ajoutées sont mixées et adaptées à la durée du film.')
+    st.selectbox('Qualité d’export',['480p','720p','1080p'],key='kc_export_quality',help='720p recommandé pour Render gratuit ; 480p si l’export reste instable.')
+    st.caption('Encodage léger : 24 images/s, 1 thread, séquences traitées séparément. Le montage peut tout de même échouer si Render redémarre.')
     ready=bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
     if not ready:st.warning('FFmpeg/FFprobe absents sur Render : installer le Dockerfile avant l’export.')
     if st.button('🎬 Exporter le film MP4',type='primary',use_container_width=True,disabled=not ready or not s.kc_order):
