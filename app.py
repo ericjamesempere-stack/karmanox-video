@@ -458,7 +458,7 @@ elif step==1:
                 with b:
                     if st.button('⬇️',key=f'down_{ident}',disabled=i==len(s.kc_scenes)-1):s.kc_scenes[i+1],s.kc_scenes[i]=s.kc_scenes[i+1],s.kc_scenes[i-1];st.rerun()
                 with c:
-                    if st.button('🗑️',key=f'del_{ident}'):s.kc_scenes.pop(i);st.rerun()
+                                        if st.button('⬇️',key=f'down_{ident}',disabled=i==len(s.kc_scenes)-1):s.kc_scenes[i+1],s.kc_scenes[i]=s.kc_scenes[i],s.kc_scenes[i+1];st.rerun()
         if st.button('➕ Ajouter une scène'):
             ident=max((x['id'] for x in s.kc_scenes),default=0)+1;s.kc_scenes.append({'id':ident,'description':'','prompt':'','transition':'','locked':False});st.rerun()
         if st.button('Continuer vers LoreMotion →',type='primary',use_container_width=True):s.kc_step=2;st.rerun()
