@@ -14,7 +14,7 @@ for k,v in DEFAULT.items():
 s=st.session_state
 
 def gemini_key():
-    return os.getenv('GEMINI_API_KEY','').strip() or (st.secrets.get('GEMINI_API_KEY','') if hasattr(st,'secrets') else '')
+    return os.environ.get("GEMINI_API_KEY", "").strip()
 
 def gemini(prompt, max_tokens=8192):
     key=gemini_key()
