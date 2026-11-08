@@ -14,7 +14,7 @@ for k,v in DEFAULT.items():
 s=st.session_state
 
 def gemini_key():
-    return os.environ.get("GEMINI_API_KEY", "").strip()
+    return os.getenv('GEMINI_API_KEY','').strip() or (st.secrets.get('GEMINI_API_KEY','') if hasattr(st,'secrets') else '')
 
 def gemini(prompt, max_tokens=8192):
     key=gemini_key()
@@ -135,26 +135,44 @@ def filters(item):
     return f
 
 def montage():
-    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg et FFprobe manquants sur Render.')
+    """Assemble les plans et mixe éventuellement musique et voix. Rend les MP4 muets par défaut."""
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        raise RuntimeError('FFmpeg et FFprobe manquants sur Render. Installer le Dockerfile.')
     size={'9:16':(720,1280),'1:1':(1080,1080),'16:9':(1280,720)}[s.kc_format]
     with tempfile.TemporaryDirectory() as d:
         root=Path(d);segs=[]
         for i,key in enumerate(s.kc_order):
             item=s.kc_clips[key];src=root/f'in{i}.mp4';src.write_bytes(item['bytes'])
-            dur=probe(src);start=float(item['start']);end=min(float(item['end']),dur);speed=float(item['speed'])
-            if start<0 or end-start<.2:raise RuntimeError(f'Découpe invalide pour la scène {i+1}.')
-            vf=f'scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease,pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25,setpts=PTS/{speed}'
-            vf+=','+','.join(filters(item)) if filters(item) else ''
-            segdur=(end-start)/speed;fade=min(float(item.get('fade',0)),segdur/2-.01)
+            dur=probe(src);start=max(0.,float(item['start']));end=min(float(item['end']),dur)
+            speed=float(item['speed'])
+            if end-start<.2 or speed<=0:raise RuntimeError(f'Découpe invalide pour la scène {i+1}.')
+            vf=f'scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease,pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25,setpts=(PTS-STARTPTS)/{speed}'
+            fx=filters(item)
+            if fx:vf+=','+','.join(fx)
+            segdur=(end-start)/speed;fade=max(0.,min(float(item.get('fade',0)),segdur/2-.02))
             if fade>.01:vf+=f',fade=t=in:st=0:d={fade:.3f},fade=t=out:st={segdur-fade:.3f}:d={fade:.3f}'
             vf+=',format=yuv420p';out=root/f'part{i}.mp4'
             ff(['-ss',start,'-i',src,'-t',end-start,'-vf',vf,'-an','-c:v','libx264','-preset','veryfast','-crf','26','-movflags','+faststart',out]);segs.append(out)
         manifest=root/'files.txt';manifest.write_text(''.join(f"file '{p.name}'\n" for p in segs))
         joined=root/'joined.mp4';ff(['-f','concat','-safe','0','-i',manifest,'-c','copy',joined])
-        if not s.kc_music:return joined.read_bytes()
-        ext=Path(s.kc_music_name).suffix.lower() or '.mp3';audio=root/('sound'+ext);audio.write_bytes(s.kc_music)
-        final=root/'final.mp4';ff(['-i',joined,'-i',audio,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-b:a','192k','-shortest','-movflags','+faststart',final])
-        return final.read_bytes()
+        tracks=[]
+        for label,blob,name,volume in [('musique',s.kc_music,s.kc_music_name,s.get('kc_music_volume',1.)),('voix',s.get('kc_voice'),s.get('kc_voice_name','voix.wav'),s.get('kc_voice_volume',1.))]:
+            if blob and volume>0:
+                suffix=Path(name).suffix.lower()
+                if suffix not in ('.wav','.mp3','.m4a','.aac','.ogg'):suffix='.wav'
+                target=root/(label+suffix);target.write_bytes(blob);tracks.append((target,float(volume)))
+        if not tracks:return joined.read_bytes()
+        args=['-i',joined]
+        for target,_ in tracks:args+=['-i',target]
+        # Chaque piste est bouclée pour couvrir le clip, puis coupée exactement à sa durée.
+        total=sum((float(s.kc_clips[k]['end'])-float(s.kc_clips[k]['start']))/float(s.kc_clips[k]['speed']) for k in s.kc_order)
+        graph=[]
+        for i,(_,vol) in enumerate(tracks,1):graph.append(f'[{i}:a]aresample=44100,volume={vol:.3f},apad,atrim=duration={total:.3f},asetpts=PTS-STARTPTS[a{i}]')
+        if len(tracks)==1:graph.append('[a1]anull[aout]')
+        else:graph.append(''.join(f'[a{i}]' for i in range(1,len(tracks)+1))+f'amix=inputs={len(tracks)}:duration=longest:normalize=0[aout]')
+        out=root/'final.mp4'
+        ff(args+['-filter_complex',';'.join(graph),'-map','0:v:0','-map','[aout]','-c:v','copy','-c:a','aac','-b:a','192k','-t',total,'-movflags','+faststart',out],timeout=900)
+        return out.read_bytes()
 
 st.title('🎬 KarmaClip Studio')
 st.caption('Ton image → une vraie histoire IA → LoreMotion → ton montage')
@@ -289,9 +307,9 @@ elif step==2:
     if st.button('Mes vidéos sont prêtes → Montage',type='primary',use_container_width=True):s.kc_step=3;st.rerun()
 
 else:
-    st.header('4 · Monter mon clip')
-    st.caption('Importe tes MP4 de LoreMotion, change leur ordre, découpe, vitesse, filtres et ajoute une bande-son.')
-    uploads=st.file_uploader('Importer les séquences MP4',type=['mp4'],accept_multiple_files=True,key='video_upload')
+    st.header('4 · Atelier de montage')
+    st.caption('Importe tes MP4, arrange les plans, règle chaque séquence, ajoute musique et voix, puis exporte.')
+    uploads=st.file_uploader('📥 Ajouter des vidéos MP4',type=['mp4'],accept_multiple_files=True,key='video_upload')
     if uploads:
         for up in uploads:
             raw=up.getvalue();ident=hashlib.sha256(raw).hexdigest()
@@ -300,47 +318,59 @@ else:
                 if shutil.which('ffprobe'):
                     try:
                         with tempfile.TemporaryDirectory() as d:
-                            p=Path(d)/'clip.mp4';p.write_bytes(raw);dur=probe(p)
+                            f=Path(d)/'clip.mp4';f.write_bytes(raw);dur=probe(f)
                     except Exception:pass
                 s.kc_clips[ident]={'name':up.name,'bytes':raw,'start':0.,'end':round(dur,2),'speed':1.,'effect':'Aucun','intensity':.5,'fade':0.,'mirror':False}
                 s.kc_order.append(ident)
     if s.kc_order:
-        total=sum(max(0,s.kc_clips[k]['end']-s.kc_clips[k]['start'])/s.kc_clips[k]['speed'] for k in s.kc_order)
-        st.metric('Durée du montage',f'{total:.1f} secondes')
+        total=sum(max(0.,float(s.kc_clips[k]['end'])-float(s.kc_clips[k]['start']))/max(.1,float(s.kc_clips[k]['speed'])) for k in s.kc_order)
+        st.metric('🎬 Durée du film',f'{int(total//60)} min {int(total%60):02d} s')
+        st.markdown('**Ordre des séquences**')
         for i,key in enumerate(s.kc_order):
             item=s.kc_clips[key]
-            with st.expander(f'🎞️ {i+1}. {item["name"]}',expanded=i==0):
-                st.video(item['bytes']);a,b=st.columns(2)
-                with a:item['start']=st.number_input('Début (s)',min_value=0.,value=float(item['start']),step=.25,key=f'start_{key}')
-                with b:item['end']=st.number_input('Fin (s)',min_value=.2,value=float(item['end']),step=.25,key=f'end_{key}')
-                item['speed']=st.select_slider('Vitesse',options=[.5,.75,1.,1.25,1.5,2.],value=float(item['speed']),key=f'speed_{key}')
-                item['effect']=st.selectbox('Effet visuel',['Aucun','Cinéma','Vintage','Noir et blanc','Couleurs vives','Lumineux','Sombre','Froid','Chaud','Flou','Netteté','Vignette','Grain','Miroir'],index=['Aucun','Cinéma','Vintage','Noir et blanc','Couleurs vives','Lumineux','Sombre','Froid','Chaud','Flou','Netteté','Vignette','Grain','Miroir'].index(item['effect']),key=f'effect_{key}')
-                item['intensity']=st.slider('Intensité',0.,1.,float(item['intensity']),.1,key=f'intensity_{key}')
-                item['fade']=st.select_slider('Fondu au noir',options=[0.,.2,.4,.6,1.],value=float(item['fade']),key=f'fade_{key}')
+            with st.expander(f'{i+1:02d} · {item["name"]} · {(float(item["end"])-float(item["start"]))/float(item["speed"]):.1f} s',expanded=i==0):
+                st.video(item['bytes'])
+                a,b=st.columns(2)
+                with a:item['start']=st.number_input('Début (secondes)',min_value=0.,value=float(item['start']),step=.1,key=f'start_{key}')
+                with b:item['end']=st.number_input('Fin (secondes)',min_value=.2,value=float(item['end']),step=.1,key=f'end_{key}')
+                item['speed']=st.select_slider('Vitesse',options=[.25,.5,.75,1.,1.25,1.5,2.,3.,4.],value=float(item['speed']),key=f'speed_{key}')
+                effects=['Aucun','Cinéma','Vintage','Noir et blanc','Couleurs vives','Lumineux','Sombre','Froid','Chaud','Flou','Netteté','Vignette','Grain','Miroir']
+                item['effect']=st.selectbox('Effet',effects,index=effects.index(item['effect']) if item['effect'] in effects else 0,key=f'effect_{key}')
+                item['intensity']=st.slider('Intensité de l’effet',0.,1.,float(item['intensity']),.1,key=f'intensity_{key}')
+                item['fade']=st.select_slider('Fondu noir en entrée et sortie',options=[0.,.2,.4,.6,1.],value=float(item['fade']),key=f'fade_{key}')
                 item['mirror']=st.checkbox('Miroir horizontal',value=bool(item['mirror']),key=f'mirror_{key}')
                 a,b,c=st.columns(3)
                 with a:
-                    if st.button('⬆️',key=f'cu_{key}',disabled=i==0):s.kc_order[i-1],s.kc_order[i]=s.kc_order[i],s.kc_order[i-1];st.rerun()
+                    if st.button('⬆️ Monter',key=f'cu_{key}',disabled=i==0,use_container_width=True):s.kc_order[i-1],s.kc_order[i]=s.kc_order[i],s.kc_order[i-1];s.kc_final=None;st.rerun()
                 with b:
-                    if st.button('⬇️',key=f'cd_{key}',disabled=i==len(s.kc_order)-1):s.kc_order[i+1],s.kc_order[i]=s.kc_order[i],s.kc_order[i+1];st.rerun()
+                    if st.button('⬇️ Descendre',key=f'cd_{key}',disabled=i==len(s.kc_order)-1,use_container_width=True):s.kc_order[i+1],s.kc_order[i]=s.kc_order[i],s.kc_order[i+1];s.kc_final=None;st.rerun()
                 with c:
-                    if st.button('🗑️',key=f'cx_{key}'):
-                        s.kc_order.pop(i);s.kc_clips.pop(key,None);st.rerun()
-    music=st.file_uploader('🎵 Musique ou voix (MP3/WAV/M4A)',type=['mp3','wav','m4a'],key='montage_audio')
-    if music:
-        s.kc_music=music.getvalue();s.kc_music_name=music.name;st.audio(s.kc_music)
-    elif s.kc_music:st.caption(f'Bande-son conservée : {s.kc_music_name}')
+                    if st.button('🗑️ Retirer',key=f'cx_{key}',use_container_width=True):s.kc_order.pop(i);s.kc_clips.pop(key,None);s.kc_final=None;st.rerun()
+    st.markdown('### 🎧 Audio')
+    music=st.file_uploader('Musique de fond (MP3, WAV, M4A)',type=['mp3','wav','m4a'],key='montage_audio')
+    if music:s.kc_music=music.getvalue();s.kc_music_name=music.name
+    if s.kc_music:
+        st.audio(s.kc_music)
+        s.kc_music_volume=st.slider('Volume musique',0.,2.,float(s.get('kc_music_volume',1.)),.1)
+        if st.button('Supprimer la musique du montage'):s.kc_music=None;st.rerun()
+    voice=st.file_uploader('Voix off séparée (MP3, WAV, M4A)',type=['mp3','wav','m4a'],key='voice_upload')
+    if voice:s.kc_voice=voice.getvalue();s.kc_voice_name=voice.name
+    if s.get('kc_voice'):
+        st.audio(s.kc_voice)
+        s.kc_voice_volume=st.slider('Volume voix',0.,2.,float(s.get('kc_voice_volume',1.)),.1)
+        if st.button('Supprimer la voix off'):s.kc_voice=None;st.rerun()
+    st.caption('Les sons des MP4 d’origine sont désactivés. Les pistes audio ajoutées sont mixées et adaptées à la durée du film.')
     ready=bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
-    if not ready:st.warning('FFmpeg/FFprobe indisponibles sur le serveur. Voir le Dockerfile fourni.')
-    if st.button('🎬 Exporter mon clip MP4',type='primary',use_container_width=True,disabled=not ready or not s.kc_order):
+    if not ready:st.warning('FFmpeg/FFprobe absents sur Render : installer le Dockerfile avant l’export.')
+    if st.button('🎬 Exporter le film MP4',type='primary',use_container_width=True,disabled=not ready or not s.kc_order):
         try:
-            with st.spinner('Montage en cours…'):s.kc_final=montage()
-            st.success('Export terminé !')
-        except Exception as e:st.error(str(e))
+            with st.spinner('Encodage en cours…'):s.kc_final=montage()
+            st.success('Film prêt !')
+        except Exception as e:st.error(f'Export impossible : {e}')
     if s.kc_final:
         st.video(s.kc_final)
-        st.download_button('⬇️ Télécharger le MP4',s.kc_final,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
-    st.link_button('✂️ Ouvrir CapCut pour les effets avancés','https://www.capcut.com/editor',use_container_width=True)
-    st.caption('Le montage intégré applique les effets à l’export. Pas encore de timeline tactile, sous-titres automatiques ou plusieurs pistes audio simultanées. Les clips longs dépendent des limites de Render.')
+        st.download_button('⬇️ Enregistrer le film MP4',s.kc_final,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
+    st.link_button('✂️ CapCut (montage avancé, facultatif)','https://www.capcut.com/editor',use_container_width=True)
+    st.caption('Les effets sont visibles après export. Pas encore de timeline tactile, de prévisualisation instantanée des effets ni de transitions animées. Les clips longs peuvent dépasser les limites du serveur gratuit.')
 
 st.divider();st.caption('KarmaClip Studio · Gemini IA · LoreMotion · Montage')
