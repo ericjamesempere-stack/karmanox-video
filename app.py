@@ -555,4 +555,10 @@ else:
             st.download_button('⬇️ Enregistrer le film MP4',output,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
     elif s.kc_final:
         st.warning('Export temporaire perdu après redémarrage. Relance le montage.')
-    st.link_button('📱 Ouvrir CapCut sur Android','https://play.google.com/store/apps/details?id
+    st.link_button('📱 Ouvrir CapCut sur Android','https://play.google.com/store/apps
+    st.link_button('📱 Ouvrir CapCut sur Android','https://play.google.com/store/apps/details?id=com.lemon.lvoverseas',use_container_width=True)
+    st.caption('Après export, enregistre le MP4 sur ton téléphone puis importe-le dans CapCut.')
+    st.caption('Les effets sont visibles après export. Les clips longs peuvent dépasser les limites du serveur gratuit.')
+
+st.divider()
+st.caption('KarmaClip Studio · Gemini IA · LoreMotion · Montage')
