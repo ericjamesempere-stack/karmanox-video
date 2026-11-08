@@ -452,11 +452,13 @@ elif step==1:
                         sc.update(updated)
                         sc['revision']=rev+1;st.rerun()
                     except Exception as e:st.error(str(e))
-                a,b,c=st.columns(3)
+                                a,b,c=st.columns(3)
                 with a:
                     if st.button('⬆️',key=f'up_{ident}',disabled=i==0):s.kc_scenes[i-1],s.kc_scenes[i]=s.kc_scenes[i],s.kc_scenes[i-1];st.rerun()
                 with b:
-                    if st.button('⬇️',key=f'down_{ident}',disabled=i==len(s.kc_scenes)-1):s.kc_scenes[i+1],s.kc_scenes[i]=s.kc_scenes[i+1],s.kc_scenes[i-1];st.rerun()
+                    if st.button('⬇️',key=f'down_{ident}',disabled=i==len(s.kc_scenes)-1):s.kc_scenes[i+1],s.kc_scenes[i]=s.kc_scenes[i],s.kc_scenes[i+1];st.rerun()
+                with c:
+                    if st.button('🗑️',key=f'del_{ident}'):s.kc_scenes.pop(i);st.rerun()
                 with c:
                                         if st.button('⬇️',key=f'down_{ident}',disabled=i==len(s.kc_scenes)-1):s.kc_scenes[i+1],s.kc_scenes[i]=s.kc_scenes[i],s.kc_scenes[i+1];st.rerun()
         if st.button('➕ Ajouter une scène'):
