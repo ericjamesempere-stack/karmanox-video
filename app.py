@@ -1,285 +1,346 @@
-import io, json, zipfile, shutil, subprocess, tempfile, re
+import io, os, re, json, zipfile, shutil, subprocess, tempfile, hashlib, math
 from pathlib import Path
+import requests
 import streamlit as st
 from PIL import Image, ImageOps, ImageEnhance
 
-st.set_page_config(page_title='KarmaClip Studio',page_icon='🎬',layout='centered',initial_sidebar_state='collapsed')
-STEPS=['🎨 Image','✍️ Storyboard','🎥 LoreMotion','🎞️ Montage']
-ENGINES={'LoreMotion':'https://loremotion.com/generate/','WAN':'https://wan2.video/fr/free-ai-video-generator','NiftyVid':'https://igorcsis.github.io/nifty-vid/'}
-DEFAULT={'step':STEPS[0],'project':'Mon clip','idea':'','lyrics':'','style':'Cinématographique','format':'9:16','image':None,'image_prompt':'','video_prompt':'','movement':'Mouvement naturel et fluide','camera':'Travelling lent','mood':'Cinématographique','duration':5,'continuity':True,'scenes':[],'engine':'LoreMotion','final':None,'music':None,'clip_data':{},'clip_order':[],'title':'','artist':''}
+st.set_page_config(page_title='KarmaClip Studio', page_icon='🎬', layout='centered', initial_sidebar_state='collapsed')
+st.markdown('<style>.block-container{max-width:850px;padding-top:1rem}div.stButton button,div.stDownloadButton button,div.stLinkButton a{min-height:44px;border-radius:12px}</style>',unsafe_allow_html=True)
+ENGINES={'LoreMotion':'https://loremotion.com/generate/','WAN 2.2':'https://wan2.video/fr/free-ai-video-generator','NiftyVid':'https://igorcsis.github.io/nifty-vid/'}
+STEPS=['1 · Image','2 · Scénario IA','3 · Vidéo','4 · Montage']
+DEFAULT={'step':0,'name':'Mon clip','idea':'','lyrics':'','style':'Cinématographique','format':'9:16','image':None,'music':None,'music_name':'','audio_report':None,'scenes':[],'proposals':[],'chosen':0,'continuity':True,'scene_seconds':5,'scene_count':6,'engine':'LoreMotion','clips':{},'order':[],'final':None,'project_seed':0}
 for k,v in DEFAULT.items():
     if 'kc_'+k not in st.session_state: st.session_state['kc_'+k]=v
 s=st.session_state
-st.markdown('''<style>.block-container{max-width:850px;padding-top:1rem;padding-bottom:4rem}div.stButton button,div.stDownloadButton button,div.stLinkButton a{min-height:48px;border-radius:12px}div[data-testid="stImage"] img{border-radius:14px}h1,h2{letter-spacing:-.025em}</style>''',unsafe_allow_html=True)
 
-def go(x): s.kc_step=x
+def gemini_key():
+    return os.getenv('GEMINI_API_KEY','').strip() or (st.secrets.get('GEMINI_API_KEY','') if hasattr(st,'secrets') else '')
 
-def nav(label,x,primary=True): st.button(label,on_click=go,args=(x,),type='primary' if primary else 'secondary',use_container_width=True)
+def gemini(prompt, max_tokens=8192):
+    key=gemini_key()
+    if not key: raise RuntimeError('Clé GEMINI_API_KEY absente sur le serveur Render.')
+    # REST endpoint; no extra Google SDK required. Model can be overridden on Render.
+    model=os.getenv('GEMINI_MODEL','gemini-2.5-flash')
+    url=f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+    payload={'contents':[{'parts':[{'text':prompt}]}], 'generationConfig':{'temperature':0.95,'maxOutputTokens':max_tokens,'responseMimeType':'application/json'}}
+    try:
+        r=requests.post(url,headers={'x-goog-api-key':key,'Content-Type':'application/json'},json=payload,timeout=110)
+    except requests.RequestException as e: raise RuntimeError(f'Connexion Gemini impossible : {e}')
+    if r.status_code!=200:
+        try: msg=r.json().get('error',{}).get('message',r.text[:400])
+        except Exception: msg=r.text[:400]
+        if r.status_code==429: raise RuntimeError('Quota Gemini gratuit atteint. Réessaie plus tard ; aucune facturation n’est déclenchée par KarmaClip.')
+        raise RuntimeError(f'Gemini ({r.status_code}) : {msg}')
+    try:
+        data=r.json();parts=data['candidates'][0]['content']['parts'];raw=''.join(p.get('text','') for p in parts)
+        raw=re.sub(r'^```(?:json)?\s*|\s*```$','',raw.strip())
+        return json.loads(raw)
+    except Exception as e: raise RuntimeError(f'Réponse Gemini inexploitable : {e}. Réessaie.')
+
+def audio_analysis(raw, name):
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        return {'note':'FFmpeg indisponible : analyse audio non réalisable sur ce serveur.','duration':None,'energy':[]}
+    with tempfile.TemporaryDirectory() as d:
+        p=Path(d)/('audio'+Path(name).suffix.lower());p.write_bytes(raw)
+        meta=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(p)],capture_output=True,text=True,timeout=30)
+        if meta.returncode: raise RuntimeError('Format audio illisible.')
+        duration=float(meta.stdout.strip())
+        # Downsample to 4 kHz mono for lightweight energy analysis.
+        q=subprocess.run(['ffmpeg','-v','error','-i',str(p),'-ac','1','-ar','4000','-f','s16le','-'],capture_output=True,timeout=100)
+        if q.returncode: raise RuntimeError('Décodage audio impossible.')
+        import array
+        pcm=array.array('h');pcm.frombytes(q.stdout[:120000000])
+        bucket=4000*5;energy=[]
+        for i in range(0,len(pcm),bucket):
+            chunk=pcm[i:i+bucket]
+            if not chunk:continue
+            rms=math.sqrt(sum(float(x)*x for x in chunk)/len(chunk))/32768
+            energy.append(round(rms,4))
+        changes=sorted(range(1,len(energy)),key=lambda i:abs(energy[i]-energy[i-1]),reverse=True)[:12]
+        return {'duration':round(duration,1),'energy':energy,'changes_seconds':sorted(i*5 for i in changes),'note':'Énergie mesurée toutes les 5 secondes. Les paroles sont interprétées à partir du texte fourni ; le BPM et le genre ne sont pas déduits automatiquement.'}
+
+def creative_brief():
+    a=s.kc_audio_report or {}
+    return {'idea':s.kc_idea,'style':s.kc_style,'lyrics':s.kc_lyrics[:15000], 'music_analysis':a,'number_of_scenes':int(s.kc_scene_count),'seconds_per_scene':int(s.kc_scene_seconds),'continuity':s.kc_continuity,'image_reference':bool(s.kc_image),'random_direction_seed':s.kc_project_seed}
+
+def new_proposals():
+    brief=creative_brief()
+    prompt='''Tu es un réalisateur de clips musicaux exceptionnellement inventif. Réponds UNIQUEMENT avec un objet JSON valide de la forme {"proposals":[{"title":"...","concept":"...","visual_identity":"...","scenes":[{"description":"...","prompt":"...","transition":"..."}]}]}. Crée EXACTEMENT 3 propositions RADICALEMENT différentes, chacune avec EXACTEMENT le nombre de scènes demandé. Ne recopie pas les mots du brief : développe une véritable dramaturgie visuelle, des actions concrètes et originales, des plans variés, un mouvement de caméra, lumière, cadrage, continuité spatiale et temporelle. Chaque prompt est AUTONOME, prêt à coller dans LoreMotion, en anglais clair, indique sujet, action, mouvement, caméra, décor, durée, et contraintes de cohérence. Ne réclame pas de texte visible dans les vidéos. Si continuité demandée, assure une progression causale explicite, identité et vêtements stables, et des raccords compatibles entre scènes. Si paroles fournies, synchronise l'intention et la progression des scènes aux paroles sans les illustrer littéralement à chaque fois. Si analyse audio présente, utilise les variations d'énergie et les changements mesurés comme indices sans inventer de BPM. Évite clichés, répétitions, images génériques. Chaque proposition doit être complète, et chaque scène doit comporter description, prompt et transition. Brief JSON :\n'''+json.dumps(brief,ensure_ascii=False)
+    data=gemini(prompt,16000)
+    proposals=data.get('proposals',[])
+    if len(proposals)<2:raise RuntimeError('Gemini n’a pas renvoyé plusieurs scénarios. Réessaie.')
+    n=int(s.kc_scene_count)
+    for p in proposals:
+        if len(p.get('scenes',[]))!=n:raise RuntimeError('Le nombre de scènes renvoyé est incorrect. Réessaie.')
+        for scene in p['scenes']:
+            if not scene.get('prompt'):raise RuntimeError('Un prompt de scène manque. Réessaie.')
+    return proposals
+
+def change_scene(scene, direction):
+    brief={'original':scene,'instruction':direction,'whole_story':[{'description':x.get('description',''),'prompt':x.get('prompt','')} for x in s.kc_scenes], 'duration':s.kc_scene_seconds,'continuity':s.kc_continuity}
+    data=gemini('''Réécris UNE scène de clip, avec inventivité, sans modifier les autres. Respecte le raccord narratif avec les scènes voisines. Retourne UNIQUEMENT JSON {"description":"...","prompt":"...","transition":"..."}. Prompt vidéo en anglais précis prêt pour LoreMotion. Données : '''+json.dumps(brief,ensure_ascii=False),3500)
+    if not data.get('prompt'):raise RuntimeError('Prompt manquant dans la réponse.')
+    return data
 
 def png(im):
-    b=io.BytesIO();im.convert('RGB').save(b,'PNG');return b.getvalue()
+    b=io.BytesIO();im.convert('RGB').save(b,format='PNG');return b.getvalue()
 
-def video_prompt(scene=None):
-    subject=scene if scene is not None else s.kc_idea
-    return '\n'.join([f'Scene: {subject or "Animate the reference image"}.',f'Movement: {s.kc_movement}.',f'Camera: {s.kc_camera}.',f'Mood: {s.kc_mood}.',f'Duration: {s.kc_duration} seconds.','Preserve identity, face, clothes, and environment across shots.' if s.kc_continuity else 'Allow visual changes between shots.','Smooth coherent motion, cinematic framing, no watermark.'])
-
-def make_scenes(text,n):
-    lines=[x.strip() for x in text.splitlines() if x.strip() and not x.strip().startswith('[')] or [s.kc_idea or 'A surprising cinematic scene']
-    out=[]
-    for i in range(n):
-        desc=' '.join(lines[i*len(lines)//n:(i+1)*len(lines)//n]).strip() or lines[i%len(lines)]
-        out.append({'id':i+1,'description':desc,'locked':False})
-    return out
-
-def project_zip():
-    data={k:s.get('kc_'+k) for k in DEFAULT if k not in ('image','final','music','clip_data')}
+def export_project():
+    data={k:s.get('kc_'+k) for k in DEFAULT if k not in ('image','music','clips','final')}
     b=io.BytesIO()
     with zipfile.ZipFile(b,'w',zipfile.ZIP_DEFLATED) as z:
         z.writestr('project.json',json.dumps(data,ensure_ascii=False,indent=2))
         if s.kc_image:z.writestr('image.png',s.kc_image)
+        if s.kc_music:z.writestr('music'+Path(s.kc_music_name).suffix,s.kc_music)
+        # Clips intentionally excluded to avoid very large ZIPs.
     return b.getvalue()
 
-def restore_callback():
-    try:
-        f=s.get('restore_upload')
-        if f is None:return
-        with zipfile.ZipFile(io.BytesIO(f.getvalue())) as z:
-            data=json.loads(z.read('project.json'))
-            for k,v in DEFAULT.items():
-                if k in data and k not in ('image','final','music','clip_data') and isinstance(data[k],type(v)):s['kc_'+k]=data[k]
-            if 'image.png' in z.namelist():
-                with Image.open(io.BytesIO(z.read('image.png'))) as im:s.kc_image=png(ImageOps.exif_transpose(im))
-        s.restore_status='Projet restauré.'
-    except Exception as e:s.restore_status=f'Restauration impossible : {e}'
+def restore_project(raw):
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        data=json.loads(z.read('project.json'))
+        for k,v in DEFAULT.items():
+            if k in data and k not in ('image','music','clips','final') and isinstance(data[k],type(v)):
+                s['kc_'+k]=data[k]
+        if 'image.png' in z.namelist():s.kc_image=z.read('image.png')
+        for name in z.namelist():
+            if name.startswith('music.'):
+                s.kc_music=z.read(name);s.kc_music_name=name
+    s.kc_final=None
 
-def reset():
-    for k in list(s):
-        if k.startswith('kc_'):del s[k]
+def ff(args,timeout=600):
+    p=subprocess.run(['ffmpeg','-nostdin','-y','-hide_banner','-loglevel','error',*map(str,args)],capture_output=True,text=True,timeout=timeout)
+    if p.returncode:raise RuntimeError(p.stderr[-900:] or 'Erreur FFmpeg')
 
 def probe(path):
     p=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(path)],capture_output=True,text=True,timeout=30)
-    if p.returncode:raise RuntimeError('Vidéo illisible : '+p.stderr[-250:])
+    if p.returncode:raise RuntimeError('MP4 non reconnu.')
     return float(p.stdout.strip())
 
-def ff(args,timeout=240):
-    p=subprocess.run(['ffmpeg','-nostdin','-y','-hide_banner','-loglevel','error',*map(str,args)],capture_output=True,text=True,timeout=timeout)
-    if p.returncode:raise RuntimeError(p.stderr[-700:] or 'Erreur FFmpeg')
+def filters(item):
+    e=item.get('effect','Aucun');v=float(item.get('intensity',.5));f=[]
+    if e=='Noir et blanc':f.append('hue=s=0')
+    elif e=='Cinéma':f.append(f'eq=contrast={1+.22*v:.3f}:saturation={1-.12*v:.3f}')
+    elif e=='Vintage':f.append(f'eq=saturation={1-.5*v:.3f}:gamma_r={1+.12*v:.3f}:gamma_b={1-.1*v:.3f}')
+    elif e=='Couleurs vives':f.append(f'eq=saturation={1+v:.3f}')
+    elif e=='Lumineux':f.append(f'eq=brightness={.16*v:.3f}')
+    elif e=='Sombre':f.append(f'eq=brightness={-.2*v:.3f}')
+    elif e=='Froid':f.append(f'colorbalance=rs={-.2*v:.3f}:bs={.2*v:.3f}')
+    elif e=='Chaud':f.append(f'colorbalance=rs={.2*v:.3f}:bs={-.2*v:.3f}')
+    elif e=='Flou':f.append(f'boxblur={int(1+6*v)}:1')
+    elif e=='Netteté':f.append(f'unsharp=5:5:{.2+v:.2f}')
+    elif e=='Vignette':f.append(f'vignette=angle={.2+.4*v:.3f}')
+    elif e=='Grain':f.append(f'noise=alls={int(4+24*v)}:allf=t')
+    elif e=='Miroir':f.append('hflip')
+    if item.get('mirror') and e!='Miroir':f.append('hflip')
+    return f
 
-def effect_filters(item):
-    """Filtres FFmpeg réels, sans service payant."""
-    effect=item.get('effect','Aucun')
-    strength=max(0.0,min(1.0,float(item.get('intensity',0.5))))
-    filters=[]
-    if effect=='Noir et blanc': filters.append('hue=s=0')
-    elif effect=='Vintage': filters.append(f'eq=saturation={1-.5*strength:.3f}:contrast={1+.08*strength:.3f}:gamma_r={1+.12*strength:.3f}:gamma_b={1-.1*strength:.3f}')
-    elif effect=='Cinéma': filters.append(f'eq=contrast={1+.22*strength:.3f}:saturation={1-.12*strength:.3f}')
-    elif effect=='Couleurs vives': filters.append(f'eq=saturation={1+1.3*strength:.3f}:contrast={1+.12*strength:.3f}')
-    elif effect=='Lumineux': filters.append(f'eq=brightness={.16*strength:.3f}:gamma={1+.1*strength:.3f}')
-    elif effect=='Sombre': filters.append(f'eq=brightness={-.22*strength:.3f}:contrast={1+.15*strength:.3f}')
-    elif effect=='Froid': filters.append(f'colorbalance=rs={-.22*strength:.3f}:bs={.28*strength:.3f}')
-    elif effect=='Chaud': filters.append(f'colorbalance=rs={.25*strength:.3f}:bs={-.2*strength:.3f}')
-    elif effect=='Flou': filters.append(f'boxblur=luma_radius={int(1+8*strength)}:luma_power=1')
-    elif effect=='Netteté': filters.append(f'unsharp=5:5:{.2+1.3*strength:.2f}:5:5:0')
-    elif effect=='Vignette': filters.append(f'vignette=angle={.2+.5*strength:.3f}')
-    elif effect=='Grain': filters.append(f'noise=alls={int(4+30*strength)}:allf=t')
-    elif effect=='Miroir': filters.append('hflip')
-    elif effect=='Flash': filters.append(f'eq=brightness={.08+.18*strength:.3f}')
-    if item.get('mirror') and effect!='Miroir':filters.append('hflip')
-    return filters
-
-def render_montage(items,music,fmt):
-    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg/FFprobe indisponible sur le serveur.')
-    sizes={'9:16':(720,1280),'1:1':(1080,1080),'16:9':(1280,720)}
-    w,h=sizes[fmt]
+def montage():
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg et FFprobe manquants sur Render.')
+    size={'9:16':(720,1280),'1:1':(1080,1080),'16:9':(1280,720)}[s.kc_format]
     with tempfile.TemporaryDirectory() as d:
-        root=Path(d);segments=[]
-        for i,item in enumerate(items):
-            src=root/f'src_{i}.mp4';src.write_bytes(item['bytes'])
-            duration=probe(src)
-            start=min(float(item['start']),max(0,duration-.1));end=min(float(item['end']),duration)
-            if end-start<.15:raise ValueError(f'Scène {i+1} : découpe trop courte.')
-            speed=float(item['speed']);dst=root/f'seg_{i}.mp4'
-            vf=f'scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25,setpts=PTS/{speed}'
-            filters=effect_filters(item)
-            vf+=(','+','.join(filters)) if filters else ''
-            seglen=(end-start)/speed
-            fade=min(float(item.get('fade',0.0)),max(0,seglen/2-.02))
-            if fade>0:
-                vf+=f',fade=t=in:st=0:d={fade:.3f},fade=t=out:st={max(0,seglen-fade):.3f}:d={fade:.3f}'
-            vf+=',format=yuv420p' 
-            ff(['-ss',start,'-i',src,'-t',end-start,'-vf',vf,'-an','-c:v','libx264','-preset','ultrafast','-crf','26',dst])
-            segments.append(dst)
-        manifest=root/'list.txt';manifest.write_text(''.join(f"file '{p.name}'\n" for p in segments))
+        root=Path(d);segs=[]
+        for i,key in enumerate(s.kc_order):
+            item=s.kc_clips[key];src=root/f'in{i}.mp4';src.write_bytes(item['bytes'])
+            dur=probe(src);start=float(item['start']);end=min(float(item['end']),dur);speed=float(item['speed'])
+            if start<0 or end-start<.2:raise RuntimeError(f'Découpe invalide pour la scène {i+1}.')
+            vf=f'scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease,pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25,setpts=PTS/{speed}'
+            vf+=','+','.join(filters(item)) if filters(item) else ''
+            segdur=(end-start)/speed;fade=min(float(item.get('fade',0)),segdur/2-.01)
+            if fade>.01:vf+=f',fade=t=in:st=0:d={fade:.3f},fade=t=out:st={segdur-fade:.3f}:d={fade:.3f}'
+            vf+=',format=yuv420p';out=root/f'part{i}.mp4'
+            ff(['-ss',start,'-i',src,'-t',end-start,'-vf',vf,'-an','-c:v','libx264','-preset','veryfast','-crf','26','-movflags','+faststart',out]);segs.append(out)
+        manifest=root/'files.txt';manifest.write_text(''.join(f"file '{p.name}'\n" for p in segs))
         joined=root/'joined.mp4';ff(['-f','concat','-safe','0','-i',manifest,'-c','copy',joined])
-        if music:
-            suffix=Path(music['name']).suffix.lower();suffix=suffix if suffix in ('.mp3','.wav','.m4a') else '.mp3'
-            audio=root/('music'+suffix);audio.write_bytes(music['bytes']);final=root/'final.mp4'
-            ff(['-i',joined,'-i',audio,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-b:a','192k','-shortest','-movflags','+faststart',final])
-            return final.read_bytes()
-        return joined.read_bytes()
+        if not s.kc_music:return joined.read_bytes()
+        ext=Path(s.kc_music_name).suffix.lower() or '.mp3';audio=root/('sound'+ext);audio.write_bytes(s.kc_music)
+        final=root/'final.mp4';ff(['-i',joined,'-i',audio,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-b:a','192k','-shortest','-movflags','+faststart',final])
+        return final.read_bytes()
 
 st.title('🎬 KarmaClip Studio')
-st.caption('Une idée → des scènes → LoreMotion → ton clip')
-with st.expander('📁 Mon projet / sauvegarde'):
-    st.text_input('Nom du projet',key='kc_project')
-    st.download_button('💾 Sauvegarder le storyboard',project_zip(),file_name='KarmaClip_projet.zip',mime='application/zip',use_container_width=True)
-    st.file_uploader('Restaurer un projet ZIP',type=['zip'],key='restore_upload')
-    st.button('Restaurer',on_click=restore_callback,use_container_width=True)
-    st.button('🧹 Nouveau projet',on_click=reset,use_container_width=True)
-    st.caption('Le ZIP contient les textes et l’image, pas les vidéos volumineuses. Sauvegarde-le sur ton téléphone.')
-if s.get('restore_status'):st.info(s.pop('restore_status'))
-st.radio('Navigation',STEPS,key='kc_step',horizontal=True,label_visibility='collapsed')
+st.caption('Ton image → une vraie histoire IA → LoreMotion → ton montage')
+with st.expander('📁 Projet et sauvegarde'):
+    s.kc_name=st.text_input('Nom du projet',value=s.kc_name)
+    st.download_button('💾 Sauvegarder le projet',export_project(),file_name='KarmaClip_projet.zip',mime='application/zip',use_container_width=True)
+    backup=st.file_uploader('Restaurer un projet',type=['zip'])
+    if backup and st.button('Restaurer ce projet'):
+        try:restore_project(backup.getvalue());st.success('Projet restauré');st.rerun()
+        except Exception as e:st.error(str(e))
+    st.caption('Les MP4 volumineux ne sont pas inclus dans le ZIP. Garde-les sur ton téléphone.')
+step=st.radio('Parcours',list(range(4)),format_func=lambda i:STEPS[i],index=s.kc_step,horizontal=True,label_visibility='collapsed')
+s.kc_step=step
 st.divider()
 
-if s.kc_step==STEPS[0]:
-    st.header('🎨 Ton idée et ton image')
-    st.text_area('Décris ce que tu veux créer',key='kc_idea',height=110,placeholder='Un personnage danse dans un monde qui change autour de lui…')
+if step==0:
+    st.header('1 · Créer mon image')
+    st.write('Décris ton idée. Tu peux importer une image, la retoucher et la conserver comme référence pour ton clip.')
+    st.text_area('Quelques mots ou une idée',key='kc_idea',height=100,placeholder='Un tigre traverse une ville endormie…')
     a,b=st.columns(2)
-    with a:st.selectbox('Style',['Cinématographique','Photoréaliste','Anime / manga','Fantastique','Surréaliste','Vintage','Illustration','Noir et blanc'],key='kc_style')
+    with a:st.selectbox('Style',['Cinématographique','Photoréaliste','Anime / manga','Surréaliste','Fantastique','Vintage','Illustration','Noir et blanc'],key='kc_style')
     with b:st.selectbox('Format',['9:16','1:1','16:9'],key='kc_format')
-    with st.expander('🎵 Paroles / scénario'):
-        st.text_area('Paroles ou histoire',key='kc_lyrics',height=170)
-        st.text_input('Titre du single',key='kc_title');st.text_input('Artiste',key='kc_artist')
-    s.kc_image_prompt=f'Create an original {s.kc_style} visual, aspect ratio {s.kc_format}. Subject: {s.kc_idea}. Inspired by: {s.kc_lyrics[:450]}. Detailed, expressive, coherent, professional composition, no watermark.'
-    with st.expander('✨ Prompt image préparé'):
-        st.code(s.kc_image_prompt,language=None)
-        st.caption('Tu peux copier le prompt pour ton générateur d’images. Une génération IA intégrée nécessiterait un service connecté.')
-    st.markdown('### 📸 Importer et retoucher')
-    up=st.file_uploader('Photo ou image créée',type=['jpg','jpeg','png','webp'],key='image_upload')
+    if st.button('✨ Imaginer un concept d’image avec Gemini',use_container_width=True):
+        try:
+            with st.spinner('Gemini imagine ton image…'):
+                d=gemini('Propose un prompt image créatif, détaillé et visuellement original en anglais, fidèle au sujet. JSON uniquement {"prompt":"..."}. Sujet: '+s.kc_idea+' Style: '+s.kc_style+' Ratio: '+s.kc_format,1800)
+                s.kc_image_idea=d['prompt']
+        except Exception as e:st.error(str(e))
+    if s.get('kc_image_idea'):st.text_area('Prompt image à copier dans un générateur',key='kc_image_idea',height=150)
+    st.caption('La génération d’image IA n’est pas encore intégrée : Gemini prépare le concept, puis tu importes l’image créée.')
+    up=st.file_uploader('Importer une photo ou une image',type=['png','jpg','jpeg','webp'],key='image_upload')
     if up:
         try:
-            with Image.open(io.BytesIO(up.getvalue())) as im:result=ImageOps.exif_transpose(im).convert('RGB')
-            with st.expander('🎛️ Retouches'):
-                brightness=st.slider('Luminosité',.2,2.,1.,.1);contrast=st.slider('Contraste',.2,2.,1.,.1);color=st.slider('Couleur',0.,2.,1.,.1)
-            result=ImageEnhance.Brightness(result).enhance(brightness)
-            result=ImageEnhance.Contrast(result).enhance(contrast)
-            result=ImageEnhance.Color(result).enhance(color)
-            w,h={'9:16':(1080,1920),'1:1':(3000,3000),'16:9':(1920,1080)}[s.kc_format]
-            result=ImageOps.fit(result,(w,h),method=Image.Resampling.LANCZOS)
-            st.image(result,use_container_width=True)
-            raw=png(result)
+            with Image.open(io.BytesIO(up.getvalue())) as im:img=ImageOps.exif_transpose(im).convert('RGB')
+            with st.expander('🎛️ Retouches',expanded=True):
+                bright=st.slider('Luminosité',.2,2.,1.,.1);contrast=st.slider('Contraste',.2,2.,1.,.1);sat=st.slider('Saturation',0.,2.,1.,.1)
+                crop=st.checkbox('Adapter le cadrage au format',value=True)
+            img=ImageEnhance.Brightness(img).enhance(bright);img=ImageEnhance.Contrast(img).enhance(contrast);img=ImageEnhance.Color(img).enhance(sat)
+            if crop:
+                w,h={'9:16':(1080,1920),'1:1':(3000,3000),'16:9':(1920,1080)}[s.kc_format]
+                img=ImageOps.fit(img,(w,h),method=Image.Resampling.LANCZOS)
+            st.image(img,use_container_width=True);raw=png(img)
             st.download_button('⬇️ Télécharger cette image',raw,'KarmaClip_image.png','image/png',use_container_width=True)
-            if st.button('✅ Garder cette image dans mon projet',type='primary',use_container_width=True):s.kc_image=raw;st.success('Image enregistrée dans ce projet.')
+            if st.button('✅ Utiliser cette image pour le clip',type='primary',use_container_width=True):s.kc_image=raw;st.success('Image conservée.')
         except Exception as e:st.error(str(e))
-    if s.kc_image:st.image(s.kc_image,caption='Image de référence conservée',width=230)
-    nav('✍️ Préparer le storyboard',STEPS[1])
+    if s.kc_image:st.image(s.kc_image,caption='Image de référence conservée',width=200)
+    if st.button('Continuer vers le scénario →',type='primary',use_container_width=True):s.kc_step=1;st.rerun()
 
-elif s.kc_step==STEPS[1]:
-    st.header('✍️ Mon storyboard')
-    st.caption('Tu peux modifier, déplacer, verrouiller ou supprimer chaque scène.')
-    if s.kc_image:st.image(s.kc_image,width=220)
-    with st.expander('🎬 Direction artistique',expanded=True):
-        st.text_area('Idée principale',key='kc_idea',height=85)
-        st.text_input('Mouvements',key='kc_movement')
-        st.selectbox('Caméra',['Travelling lent','Caméra fixe','Travelling avant','Travelling arrière','Rotation autour du sujet','Caméra à l’épaule'],key='kc_camera')
-        st.selectbox('Ambiance',['Cinématographique','Festive','Dynamique','Mystérieuse','Épique','Romantique','Naturelle'],key='kc_mood')
-        st.selectbox('Durée par génération',[3,4,5,6,8,10],key='kc_duration')
-        st.checkbox('Conserver les personnages et le décor',key='kc_continuity')
-    st.markdown('### 🎞️ Découper en scènes')
-    count=st.number_input('Nombre de scènes',1,60,6)
-    if st.button('✨ Construire le storyboard',use_container_width=True):
-        old=[x for x in s.kc_scenes if x.get('locked')]
-        fresh=make_scenes(s.kc_lyrics or s.kc_idea,int(count))
-        for i,x in enumerate(old):
-            if i<len(fresh):fresh[i]=x
-        s.kc_scenes=fresh;st.rerun()
-    if not s.kc_scenes:st.info('Crée le storyboard, ou ajoute directement une scène.')
-    def move_scene(i,offset):
-        j=i+offset
-        if 0<=j<len(s.kc_scenes):s.kc_scenes[i],s.kc_scenes[j]=s.kc_scenes[j],s.kc_scenes[i]
-    def remove_scene(i):s.kc_scenes.pop(i)
-    for i,scene in enumerate(s.kc_scenes):
-        with st.container(border=True):
-            st.markdown(f'**Scène {i+1} · 5 secondes** '+('🔒' if scene.get('locked') else ''))
-            # Separate widget keys ensure edits persist until explicitly changed.
-            edit_key=f'edit_scene_{scene["id"]}'
-            if edit_key not in s:s[edit_key]=scene['description']
-            scene['description']=st.text_area('Action et décor',key=edit_key,height=85)
-            scene['locked']=st.checkbox('Verrouiller cette scène',value=scene.get('locked',False),key=f'lock_{scene["id"]}')
-            with st.expander('Prompt vidéo de cette scène'):st.code(video_prompt(scene['description']),language=None)
-            a,b,c=st.columns(3)
-            with a:st.button('⬆️ Monter',key=f'up_{scene["id"]}',on_click=move_scene,args=(i,-1),disabled=i==0,use_container_width=True)
-            with b:st.button('⬇️ Descendre',key=f'down_{scene["id"]}',on_click=move_scene,args=(i,1),disabled=i==len(s.kc_scenes)-1,use_container_width=True)
-            with c:st.button('🗑️ Supprimer',key=f'del_{scene["id"]}',on_click=remove_scene,args=(i,),use_container_width=True)
-    if st.button('➕ Ajouter une scène',use_container_width=True):
-        new_id=max([x['id'] for x in s.kc_scenes],default=0)+1
-        s.kc_scenes.append({'id':new_id,'description':'Nouvelle idée à développer','locked':False});st.rerun()
-    st.caption('Pour inventer des scènes vraiment nouvelles avec une IA, il faudra connecter un modèle : les descriptions actuelles proviennent de ton texte et restent entièrement modifiables.')
-    s.kc_video_prompt=video_prompt()
-    nav('🎥 Continuer vers LoreMotion',STEPS[2])
-
-elif s.kc_step==STEPS[2]:
-    st.header('🎥 Générer mes vidéos')
-    st.caption('LoreMotion est sélectionné par défaut. Les autres moteurs restent disponibles.')
-    if s.kc_image:
-        st.image(s.kc_image,width=250)
-        st.download_button('⬇️ Télécharger l’image de référence',s.kc_image,'KarmaClip_reference.png','image/png',use_container_width=True)
-    st.selectbox('Générateur',list(ENGINES),key='kc_engine')
-    st.link_button('🚀 Ouvrir la page de création — '+s.kc_engine,ENGINES[s.kc_engine],use_container_width=True)
-    st.caption('Le site externe s’ouvre directement sur sa page de génération. Il ne reçoit pas automatiquement les champs du projet.')
-    if not s.kc_video_prompt:s.kc_video_prompt=video_prompt()
-    st.text_area('Prompt principal',key='kc_video_prompt',height=180)
+elif step==1:
+    st.header('2 · Inventer mon clip avec Gemini')
+    st.text_area('Ton idée, même en trois mots',key='kc_idea',height=90)
+    st.text_area('Paroles de la chanson (facultatif)',key='kc_lyrics',height=140)
+    audio=st.file_uploader('Musique MP3, WAV ou M4A (facultatif)',type=['mp3','wav','m4a'],key='music_upload')
+    if audio:
+        raw=audio.getvalue();digest=hashlib.sha256(raw).hexdigest()
+        if s.get('kc_music_digest')!=digest:
+            s.kc_music=raw;s.kc_music_name=audio.name;s.kc_music_digest=digest;s.kc_audio_report=None
+        st.audio(raw)
+    if s.kc_music:
+        if st.button('🎵 Analyser la musique',use_container_width=True):
+            try:
+                with st.spinner('Analyse de la durée et des variations d’énergie…'):s.kc_audio_report=audio_analysis(s.kc_music,s.kc_music_name)
+            except Exception as e:st.error(str(e))
+        if s.kc_audio_report:
+            st.write('Durée :',s.kc_audio_report.get('duration'),'secondes')
+            st.caption(s.kc_audio_report.get('note',''))
+            if s.kc_audio_report.get('energy'):st.line_chart(s.kc_audio_report['energy'])
+    a,b=st.columns(2)
+    with a:st.number_input('Nombre de scènes',min_value=1,max_value=60,key='kc_scene_count')
+    with b:st.selectbox('Durée par scène (secondes)',[3,4,5,6,8,10],key='kc_scene_seconds')
+    st.checkbox('Histoire continue : mêmes personnages, décors et raccords',key='kc_continuity')
+    if st.button('✨ Créer 3 scénarios vraiment différents',type='primary',use_container_width=True):
+        if not s.kc_idea.strip() and not s.kc_lyrics.strip():st.warning('Écris quelques mots ou ajoute des paroles.')
+        else:
+            try:
+                s.kc_project_seed+=1
+                with st.spinner('Gemini construit trois réalisations complètes…'):
+                    s.kc_proposals=new_proposals();s.kc_chosen=0
+                st.success('Trois propositions créées !')
+            except Exception as e:st.error(str(e))
+    if s.kc_proposals:
+        labels=[f'{i+1}. {p.get("title","Proposition")}' for i,p in enumerate(s.kc_proposals)]
+        chosen=st.radio('Choisis ton scénario',list(range(len(labels))),format_func=lambda i:labels[i],key='kc_chosen')
+        p=s.kc_proposals[chosen]
+        st.write('**Concept :**',p.get('concept',''));st.write('**Identité visuelle :**',p.get('visual_identity',''))
+        for i,sc in enumerate(p.get('scenes',[])):
+            with st.expander(f'Scène {i+1} — {sc.get("description","")[:75]}'):
+                st.write(sc.get('description',''));st.code(sc.get('prompt',''),language=None)
+        if st.button('✅ Utiliser ce scénario et modifier les scènes',type='primary',use_container_width=True):
+            s.kc_scenes=[dict(x,id=i+1,locked=False,revision=s.kc_project_seed) for i,x in enumerate(p['scenes'])];st.rerun()
     if s.kc_scenes:
-        st.markdown('### 🎞️ Prompts par scène')
-        for i,scene in enumerate(s.kc_scenes):
-            with st.expander(f'Scène {i+1} — prêt à copier'):
-                st.code(video_prompt(scene['description']),language=None)
-    nav('🎞️ Mes MP4 sont prêts : montage',STEPS[3])
+        st.subheader('🎞️ Mes scènes modifiables')
+        for i,sc in enumerate(s.kc_scenes):
+            ident=sc['id'];rev=sc.get('revision',0)
+            with st.container(border=True):
+                st.markdown(f'**Scène {i+1} · {s.kc_scene_seconds} s**'+(' 🔒' if sc.get('locked') else ''))
+                sc['description']=st.text_area('Description',value=sc.get('description',''),key=f'desc_{ident}_{rev}')
+                sc['prompt']=st.text_area('Prompt LoreMotion (modifiable)',value=sc.get('prompt',''),height=150,key=f'prompt_{ident}_{rev}')
+                sc['locked']=st.checkbox('Verrouiller',value=sc.get('locked',False),key=f'lock_{ident}')
+                instruction=st.text_input('Demander un changement à Gemini',key=f'instr_{ident}',placeholder='Plus étrange, changer le décor, autre mouvement…')
+                if st.button('✨ Régénérer cette scène seulement',key=f'regen_{ident}',disabled=sc['locked'],use_container_width=True):
+                    try:
+                        with st.spinner('Réécriture de la scène…'):
+                            updated=change_scene(sc,instruction or 'Propose une mise en scène plus originale et visuelle')
+                        sc.update(updated)
+                        sc['revision']=rev+1;st.rerun()
+                    except Exception as e:st.error(str(e))
+                a,b,c=st.columns(3)
+                with a:
+                    if st.button('⬆️',key=f'up_{ident}',disabled=i==0):s.kc_scenes[i-1],s.kc_scenes[i]=s.kc_scenes[i],s.kc_scenes[i-1];st.rerun()
+                with b:
+                    if st.button('⬇️',key=f'down_{ident}',disabled=i==len(s.kc_scenes)-1):s.kc_scenes[i+1],s.kc_scenes[i]=s.kc_scenes[i],s.kc_scenes[i+1];st.rerun()
+                with c:
+                    if st.button('🗑️',key=f'del_{ident}'):s.kc_scenes.pop(i);st.rerun()
+        if st.button('➕ Ajouter une scène'):
+            ident=max((x['id'] for x in s.kc_scenes),default=0)+1;s.kc_scenes.append({'id':ident,'description':'','prompt':'','transition':'','locked':False});st.rerun()
+        if st.button('Continuer vers LoreMotion →',type='primary',use_container_width=True):s.kc_step=2;st.rerun()
+
+elif step==2:
+    st.header('3 · Générer mes vidéos')
+    st.caption('LoreMotion par défaut. Copie le prompt, puis importe l’image de référence sur le site si nécessaire.')
+    st.selectbox('Moteur vidéo',list(ENGINES),key='kc_engine')
+    st.link_button('🚀 Ouvrir '+s.kc_engine,ENGINES[s.kc_engine],use_container_width=True)
+    if s.kc_image:
+        st.image(s.kc_image,width=230)
+        st.download_button('⬇️ Image de référence',s.kc_image,'KarmaClip_reference.png','image/png',use_container_width=True)
+    if not s.kc_scenes:st.info('Crée ton storyboard à l’étape 2.')
+    for i,sc in enumerate(s.kc_scenes):
+        with st.expander(f'Scène {i+1} · {s.kc_scene_seconds} secondes',expanded=i==0):
+            st.write(sc.get('description',''));st.code(sc.get('prompt',''),language=None)
+            st.caption('Appuie sur le code pour le copier. Le site externe ne reçoit pas automatiquement le prompt.')
+    if st.button('Mes vidéos sont prêtes → Montage',type='primary',use_container_width=True):s.kc_step=3;st.rerun()
 
 else:
-    st.header('🎞️ Mon montage')
-    st.caption('Importe tes vidéos de LoreMotion, règle les scènes et exporte un MP4.')
-    uploaded=st.file_uploader('Importer les séquences MP4',type=['mp4'],accept_multiple_files=True,key='montage_upload')
-    if uploaded:
-        for f in uploaded:
-            # Fingerprint distinguishes same-named uploads.
-            raw=f.getvalue();ident=f'{f.name}:{len(raw)}:{hash(raw[:4096])}'
-            if ident not in s.kc_clip_data:
-                s.kc_clip_data[ident]={'name':f.name,'bytes':raw,'start':0.,'end':5.,'speed':1.,'effect':'Aucun','intensity':0.5,'transition':'Aucune','fade':0.0,'mirror':False,'volume':1.0}
-                s.kc_clip_order.append(ident)
-    if s.kc_clip_order:
-        st.markdown('### 🎬 Mes scènes dans l’ordre')
-        def move_clip(i,offset):
-            j=i+offset
-            if 0<=j<len(s.kc_clip_order):s.kc_clip_order[i],s.kc_clip_order[j]=s.kc_clip_order[j],s.kc_clip_order[i]
-        def remove_clip(i):
-            key=s.kc_clip_order.pop(i);s.kc_clip_data.pop(key,None)
-        for i,key in enumerate(s.kc_clip_order):
-            item=s.kc_clip_data[key]
-            with st.expander(f'🎬 {i+1}. {item["name"]}',expanded=i==0):
-                st.video(item['bytes'])
-                st.caption('Découpe : secondes à conserver dans cette vidéo.')
-                a,b=st.columns(2)
-                with a:item['start']=st.number_input('Début (s)',min_value=0.,value=float(item['start']),step=.5,key=f'start_{key}')
-                with b:item['end']=st.number_input('Fin (s)',min_value=.2,value=float(item['end']),step=.5,key=f'end_{key}')
+    st.header('4 · Monter mon clip')
+    st.caption('Importe tes MP4 de LoreMotion, change leur ordre, découpe, vitesse, filtres et ajoute une bande-son.')
+    uploads=st.file_uploader('Importer les séquences MP4',type=['mp4'],accept_multiple_files=True,key='video_upload')
+    if uploads:
+        for up in uploads:
+            raw=up.getvalue();ident=hashlib.sha256(raw).hexdigest()
+            if ident not in s.kc_clips:
+                dur=5.
+                if shutil.which('ffprobe'):
+                    try:
+                        with tempfile.TemporaryDirectory() as d:
+                            p=Path(d)/'clip.mp4';p.write_bytes(raw);dur=probe(p)
+                    except Exception:pass
+                s.kc_clips[ident]={'name':up.name,'bytes':raw,'start':0.,'end':round(dur,2),'speed':1.,'effect':'Aucun','intensity':.5,'fade':0.,'mirror':False}
+                s.kc_order.append(ident)
+    if s.kc_order:
+        total=sum(max(0,s.kc_clips[k]['end']-s.kc_clips[k]['start'])/s.kc_clips[k]['speed'] for k in s.kc_order)
+        st.metric('Durée du montage',f'{total:.1f} secondes')
+        for i,key in enumerate(s.kc_order):
+            item=s.kc_clips[key]
+            with st.expander(f'🎞️ {i+1}. {item["name"]}',expanded=i==0):
+                st.video(item['bytes']);a,b=st.columns(2)
+                with a:item['start']=st.number_input('Début (s)',min_value=0.,value=float(item['start']),step=.25,key=f'start_{key}')
+                with b:item['end']=st.number_input('Fin (s)',min_value=.2,value=float(item['end']),step=.25,key=f'end_{key}')
                 item['speed']=st.select_slider('Vitesse',options=[.5,.75,1.,1.25,1.5,2.],value=float(item['speed']),key=f'speed_{key}')
-                with st.expander('✨ Effets et transitions',expanded=i==0):
-                    effects=['Aucun','Cinéma','Vintage','Noir et blanc','Couleurs vives','Lumineux','Sombre','Froid','Chaud','Flou','Netteté','Vignette','Grain','Miroir','Flash']
-                    item['effect']=st.selectbox('Effet visuel',effects,index=effects.index(item.get('effect','Aucun')) if item.get('effect','Aucun') in effects else 0,key=f'effect_{key}')
-                    item['intensity']=st.slider('Intensité',0.0,1.0,float(item.get('intensity',0.5)),0.1,key=f'intensity_{key}')
-                    item['fade']=st.select_slider('Fondu au noir (entrée et sortie)',options=[0.,.2,.4,.6,1.],value=float(item.get('fade',0.0)),key=f'fade_{key}')
-                    item['mirror']=st.checkbox('Inverser horizontalement',value=bool(item.get('mirror',False)),key=f'mirror_{key}')
-                    st.caption('Les effets seront appliqués lors de l’export. Le fondu se fait au noir entre les séquences.')
+                item['effect']=st.selectbox('Effet visuel',['Aucun','Cinéma','Vintage','Noir et blanc','Couleurs vives','Lumineux','Sombre','Froid','Chaud','Flou','Netteté','Vignette','Grain','Miroir'],index=['Aucun','Cinéma','Vintage','Noir et blanc','Couleurs vives','Lumineux','Sombre','Froid','Chaud','Flou','Netteté','Vignette','Grain','Miroir'].index(item['effect']),key=f'effect_{key}')
+                item['intensity']=st.slider('Intensité',0.,1.,float(item['intensity']),.1,key=f'intensity_{key}')
+                item['fade']=st.select_slider('Fondu au noir',options=[0.,.2,.4,.6,1.],value=float(item['fade']),key=f'fade_{key}')
+                item['mirror']=st.checkbox('Miroir horizontal',value=bool(item['mirror']),key=f'mirror_{key}')
                 a,b,c=st.columns(3)
-                with a:st.button('⬆️',key=f'clipup_{key}',on_click=move_clip,args=(i,-1),disabled=i==0,use_container_width=True)
-                with b:st.button('⬇️',key=f'clipdown_{key}',on_click=move_clip,args=(i,1),disabled=i==len(s.kc_clip_order)-1,use_container_width=True)
-                with c:st.button('🗑️',key=f'clipdel_{key}',on_click=remove_clip,args=(i,),use_container_width=True)
-    music=st.file_uploader('🎵 Bande-son (MP3, WAV ou M4A)',type=['mp3','wav','m4a'],key='montage_music')
-    if music:st.audio(music)
-    fmt=st.selectbox('Format de sortie',['9:16','1:1','16:9'],index=0)
+                with a:
+                    if st.button('⬆️',key=f'cu_{key}',disabled=i==0):s.kc_order[i-1],s.kc_order[i]=s.kc_order[i],s.kc_order[i-1];st.rerun()
+                with b:
+                    if st.button('⬇️',key=f'cd_{key}',disabled=i==len(s.kc_order)-1):s.kc_order[i+1],s.kc_order[i]=s.kc_order[i],s.kc_order[i+1];st.rerun()
+                with c:
+                    if st.button('🗑️',key=f'cx_{key}'):
+                        s.kc_order.pop(i);s.kc_clips.pop(key,None);st.rerun()
+    music=st.file_uploader('🎵 Musique ou voix (MP3/WAV/M4A)',type=['mp3','wav','m4a'],key='montage_audio')
+    if music:
+        s.kc_music=music.getvalue();s.kc_music_name=music.name;st.audio(s.kc_music)
+    elif s.kc_music:st.caption(f'Bande-son conservée : {s.kc_music_name}')
     ready=bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
-    if not ready:st.warning('FFmpeg et FFprobe doivent être installés sur Render pour assembler les vidéos.')
-    if st.button('🎬 Exporter mon clip',type='primary',use_container_width=True,disabled=not s.kc_clip_order or not ready):
+    if not ready:st.warning('FFmpeg/FFprobe indisponibles sur le serveur. Voir le Dockerfile fourni.')
+    if st.button('🎬 Exporter mon clip MP4',type='primary',use_container_width=True,disabled=not ready or not s.kc_order):
         try:
-            items=[s.kc_clip_data[k] for k in s.kc_clip_order]
-            soundtrack={'name':music.name,'bytes':music.getvalue()} if music else None
-            with st.spinner('Montage en cours…'):s.kc_final=render_montage(items,soundtrack,fmt)
-            st.success('Ton clip est prêt !')
-        except Exception as e:st.error(f'Export impossible : {e}')
+            with st.spinner('Montage en cours…'):s.kc_final=montage()
+            st.success('Export terminé !')
+        except Exception as e:st.error(str(e))
     if s.kc_final:
         st.video(s.kc_final)
-        st.download_button('⬇️ Télécharger mon clip final',s.kc_final,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
-    st.link_button('✂️ Ouvrir CapCut (montage avancé)','https://www.capcut.com/editor',use_container_width=True)
-    st.caption('Montage intégré : ordre, découpe, vitesse, 14 effets visuels, intensité, miroir, fondu au noir et musique. Les effets ne s’affichent qu’après export. Les transitions animées, sous-titres automatiques et suivi IA ne sont pas encore disponibles.')
+        st.download_button('⬇️ Télécharger le MP4',s.kc_final,'KarmaClip_final.mp4','video/mp4',use_container_width=True)
+    st.link_button('✂️ Ouvrir CapCut pour les effets avancés','https://www.capcut.com/editor',use_container_width=True)
+    st.caption('Le montage intégré applique les effets à l’export. Pas encore de timeline tactile, sous-titres automatiques ou plusieurs pistes audio simultanées. Les clips longs dépendent des limites de Render.')
 
-st.divider();st.caption('KarmaClip Studio · Image → Storyboard → LoreMotion → Montage')
+st.divider();st.caption('KarmaClip Studio · Gemini IA · LoreMotion · Montage')
